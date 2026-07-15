@@ -12,8 +12,16 @@ use rust_os_blog::println;
 pub extern "C" fn _start() -> ! {
     println!("Hello World{}", "!");
 
+    rust_os_blog::init();
+
+    unsafe {
+        *(0xdeadbeef as *mut u8) = 42;
+    };
+
     #[cfg(test)]
     test_main();
+
+    println!("It did not crash!");
 
     loop {}
 }
