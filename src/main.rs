@@ -10,7 +10,8 @@ use rust_os_blog::{hlt_loop, println};
 use rust_os_blog::memory;
 use rust_os_blog::memory::BootInfoFrameAllocator;
 use x86_64::{structures::paging::Page, VirtAddr};
-
+use rust_os_blog::task::{Task, simple_executor::SimpleExecutor, keyboard};
+use rust_os_blog::task::executor::Executor;
 
 use bootloader::{BootInfo, entry_point};
 
@@ -18,6 +19,14 @@ extern crate alloc;
 
 use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
+async fn async_number() -> u32 {
+    42
+}
+
+async fn example_task() {
+    let number = async_number().await;
+    println!("async number: {}", number);
+}
 
 
 entry_point!(kernel_main);
@@ -56,6 +65,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("current reference count is {}", Rc::strong_count(&cloned_reference));
     core::mem::drop(reference_counted);
     println!("reference count is {} now", Rc::strong_count(&cloned_reference));
+
+
+   let mut executor = Executor::new(); // new
+    executor.spawn(Task::new(example_task()));
+    executor.spawn(Task::new(keyboard::print_keypresses()));
+    executor.run();
 
 
 
