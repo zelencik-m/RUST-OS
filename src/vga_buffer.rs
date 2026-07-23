@@ -1,3 +1,4 @@
+// src/vga_buffer.rs
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

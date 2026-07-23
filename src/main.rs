@@ -1,17 +1,16 @@
+// src/main.rs
 
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(rust_os_blog::test_runner)]
+#![test_runner(rust_os::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use rust_os_blog::{hlt_loop, println};
-use rust_os_blog::memory;
-use rust_os_blog::memory::BootInfoFrameAllocator;
-use x86_64::{structures::paging::Page, VirtAddr};
-use rust_os_blog::task::{Task, simple_executor::SimpleExecutor, keyboard};
-use rust_os_blog::task::executor::Executor;
+use rust_os::{hlt_loop, println};
+use x86_64::VirtAddr;
+use rust_os::task::{Task, keyboard};
+use rust_os::task::executor::Executor;
 
 use bootloader::{BootInfo, entry_point};
 
@@ -32,14 +31,15 @@ async fn example_task() {
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    use rust_os_blog::allocator; // new import
-    use rust_os_blog::memory::{self, BootInfoFrameAllocator};
+    use rust_os::allocator; // new import
+    use rust_os::memory::{self, BootInfoFrameAllocator};
 
     println!("Hello World{}", "!");
-    rust_os_blog::init();
+    rust_os::init();
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
+
     let mut frame_allocator = unsafe {
         BootInfoFrameAllocator::init(&boot_info.memory_map)
     };
@@ -52,7 +52,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let heap_value = Box::new(41);
     println!("heap_value at {:p}", heap_value);
 
-    // create a dynamically sized vector
+    // ________________________________________________
+    // demo
+    // ________________________________________________
     let mut vec = Vec::new();
     for i in 0..500 {
         vec.push(i);
@@ -65,6 +67,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("current reference count is {}", Rc::strong_count(&cloned_reference));
     core::mem::drop(reference_counted);
     println!("reference count is {} now", Rc::strong_count(&cloned_reference));
+    // ________________________________________________
 
 
    let mut executor = Executor::new(); // new
@@ -78,7 +81,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     test_main();
 
     println!("It did not crash!");
-    rust_os_blog::hlt_loop();
+    rust_os::hlt_loop();
 }
 
 /// This function is called on panic.
@@ -93,5 +96,5 @@ fn panic(info: &PanicInfo) -> ! {
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    rust_os_blog::test_panic_handler(info)
+    rust_os::test_panic_handler(info)
 }

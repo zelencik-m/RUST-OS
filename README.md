@@ -1,1 +1,1 @@
-# RUST-OS-BLOG
+# rust-os
