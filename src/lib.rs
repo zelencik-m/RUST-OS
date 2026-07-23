@@ -64,10 +64,23 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 }
 
 #[cfg(test)]
-fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {
-    // like before
+fn test_kernel_main(boot_info: &'static BootInfo) -> ! {
+    use memory::BootInfoFrameAllocator;
+    use x86_64::VirtAddr;
+    
     init();
+    
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe {
+        BootInfoFrameAllocator::init(&boot_info.memory_map)
+    };
+    
+    allocator::init_heap(&mut mapper, &mut frame_allocator)
+        .expect("heap initialization failed");
+    
     test_main();
+    
     hlt_loop();
 }
 
@@ -98,4 +111,21 @@ pub fn hlt_loop() -> ! {
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+#[test_case]
+fn trivial_assertion() {
+    assert_eq!(1, 1);
+}
+
+#[test_case]
+fn test_println_output() {
+    println!("test_println_output");
+}
+
+#[test_case]
+fn test_heap_allocation() {
+    use alloc::boxed::Box;
+    let x = Box::new(42);
+    assert_eq!(*x, 42);
 }

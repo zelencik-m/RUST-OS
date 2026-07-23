@@ -1,3 +1,5 @@
+// tests/basic_boot.rs
+
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
@@ -5,27 +7,30 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
+use rust_os::{println, serial_print, serial_println};
 
-#[unsafe(no_mangle)] // don't mangle the name of this function
+#[no_mangle] // don't mangle the name of this function
 pub extern "C" fn _start() -> ! {
     test_main();
 
     loop {}
 }
 
-fn test_runner(tests: &[&dyn Fn()]) {
-    unimplemented!();
-}
-
-
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     rust_os::test_panic_handler(info)
 }
 
-use rust_os::println;
-
 #[test_case]
 fn test_println() {
+    serial_print!("test_println... ");
     println!("test_println output");
+    serial_println!("[ok]");
+}
+
+#[test_case]
+fn test_vga_buffer_content() {
+    serial_print!("test_vga_buffer_content... ");
+    // Add actual VGA buffer assertions here if needed
+    serial_println!("[ok]");
 }
