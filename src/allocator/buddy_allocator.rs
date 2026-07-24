@@ -1,5 +1,4 @@
 use alloc::alloc::{GlobalAlloc, Layout};
-use crate::allocator::buddy_allocator;
 
 use super::{Locked, align_up};
 use core::{ptr::null_mut};
@@ -11,7 +10,7 @@ struct ListNode {
     next: Option<&'static mut ListNode>,
 }
 
-const MAX_ORDER:usize = 32;
+const MAX_ORDER:usize = 30;
 const MIN_ORDER:usize = 4;
 const NUM_ORDERS: usize = MAX_ORDER - MIN_ORDER +1;
 
@@ -46,29 +45,35 @@ impl BuddyAllocator{
             panic!("Heap size cannot be zero");
         }
 
-        let aligned_start = align_up(heap_start, 1 << MIN_ORDER);
-        let size_loss = aligned_start.saturating_sub(heap_start);
-        
-        if size_loss >= heap_size {
-            panic!("Heap too small after alignment correction");
-        }
-        
-        let available_size = heap_size - size_loss;
-
-        let adjusted_size = if available_size.is_power_of_two() {
-            available_size
+        let max_possible = heap_size.next_power_of_two() >> 1;
+        let mut candidate_size = if heap_size.is_power_of_two() {
+            heap_size
         } else {
-            1_usize << (mem::size_of::<usize>() * 8 - 1 - available_size.leading_zeros() as usize)
+            max_possible
         };
+        candidate_size = candidate_size.min(1 << MAX_ORDER);
 
-        if adjusted_size < (1 << MIN_ORDER) {
-            panic!("Heap size too small after rounding: {} bytes", adjusted_size);
-        }
+        let (aligned_start, adjusted_size) = loop {
+            if candidate_size < (1 << MIN_ORDER) {
+                panic!("Heap too small: cannot fit even a minimum-order block after alignment");
+            }
+
+            let aligned = align_up(heap_start, candidate_size);
+            let end = heap_start.saturating_add(heap_size);
+
+            if aligned <= end && candidate_size <= end - aligned {
+                break (aligned, candidate_size);
+            }
+
+            candidate_size >>= 1;
+        };
 
         let order = match self.size_to_order(adjusted_size) {
             Some(o) => o,
             None => panic!("Heap size {} out of bounds", adjusted_size),
         };
+
+        debug_assert_eq!(aligned_start % adjusted_size, 0);
 
         println!("Heap start (aligned): {:#x}", aligned_start);
         println!("Heap size (adjusted): {} bytes (order {})", adjusted_size, order);
@@ -89,7 +94,7 @@ unsafe impl GlobalAlloc for Locked<BuddyAllocator>{
         let required_block_size = layout.size().max(layout.align());
         let required_order = match buddy_allocator.size_to_order(required_block_size) {
             Some(o) => o,
-            None => panic!("Heap size {} out of bounds", required_block_size),
+            None => return null_mut(),
         };
         
         let mut order = required_order;
@@ -121,7 +126,7 @@ unsafe impl GlobalAlloc for Locked<BuddyAllocator>{
         let required_block_size = layout.size().max(layout.align());
         let required_order = match buddy_allocator.size_to_order(required_block_size) {
             Some(o) => o,
-            None => panic!("Heap size {} out of bounds", required_block_size),
+            None => return,
         };
 
         let mut current_address: usize = ptr as usize; 
