@@ -2,7 +2,7 @@ use alloc::alloc::{GlobalAlloc, Layout};
 use crate::allocator::buddy_allocator;
 
 use super::{Locked, align_up};
-use core::ptr::null_mut;
+use core::{ptr::null_mut};
 use core::mem;
 
 use super::super::{println, print};
@@ -92,14 +92,8 @@ unsafe impl GlobalAlloc for Locked<BuddyAllocator>{
             None => panic!("Heap size {} out of bounds", required_block_size),
         };
         
-        // println!("layout size: {}", layout.size());
-        // println!("layout align: {}", layout.align());
-        // println!("required block size: {}", required_block_size);
-        // println!("required order: {}", required_order);
-        
         let mut order = required_order;
 
-        // Find the smallest free block that fits
         while order < NUM_ORDERS && buddy_allocator.free_lists[order].is_none() {
             order += 1;
         }
@@ -108,11 +102,9 @@ unsafe impl GlobalAlloc for Locked<BuddyAllocator>{
             return null_mut();
         }
 
-        // println!("found order: {}", order);
 
-        let mut block = buddy_allocator.pop_free_block(order);
+        let block = buddy_allocator.pop_free_block(order);
 
-        // Split down until we reach the required order
         while order > required_order {
             order -= 1;
             let half_size = buddy_allocator.order_to_size(order);
@@ -124,7 +116,29 @@ unsafe impl GlobalAlloc for Locked<BuddyAllocator>{
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // TODO: implement deallocation with buddy merging
+        let mut buddy_allocator = self.lock();
+
+        let required_block_size = layout.size().max(layout.align());
+        let required_order = match buddy_allocator.size_to_order(required_block_size) {
+            Some(o) => o,
+            None => panic!("Heap size {} out of bounds", required_block_size),
+        };
+
+        let mut current_address: usize = ptr as usize; 
+        let mut current_order = required_order;
+
+        while let Some(buddy_ptr) = buddy_allocator.pop_buddy_of(current_address, current_order){
+            let buddy_address = buddy_ptr as usize;
+            current_address = current_address.min(buddy_address);
+            current_order +=1;
+            if current_order >= NUM_ORDERS{
+                break;
+            }
+        }
+
+        buddy_allocator.push_free_block(current_order, current_address as *mut u8);
+
+        
     }
 }
 
@@ -180,6 +194,39 @@ impl BuddyAllocator {
             None => null_mut(),
         }
     }
+
+    unsafe fn pop_buddy_of(&mut self, address: usize, order: usize) -> Option<*mut u8> {
+        assert!(order < NUM_ORDERS, "pop_buddy_of: order out of bounds");
+
+        let buddy_addr = self.buddy_of(address, order);
+        
+        if let Some(node) = self.free_lists[order].as_ref() {
+            if *node as *const ListNode as usize == buddy_addr {
+                return Some(self.pop_free_block(order));
+            }
+        }
+        
+        let mut prev: *mut ListNode = match self.free_lists[order].as_mut() {
+            Some(node) => *node as *mut ListNode,
+            None => return None,
+        };
+        
+        loop {
+            let current: *mut ListNode = match (*prev).next.as_mut() {
+                Some(node) => *node as *mut ListNode,
+                None => return None,
+            };
+            
+            if current as usize == buddy_addr {
+                let current_ref = &mut *current;
+                (*prev).next = current_ref.next.take();
+                return Some(current as *mut u8);
+            }
+            
+            prev = current;
+        }
+    }
+
     fn print_free_lists(&self) {
         println!("========== Buddy Allocator Free Lists ==========");
         println!("Heap: start={:#x}, size={} bytes", self.heap_start, self.heap_size);
