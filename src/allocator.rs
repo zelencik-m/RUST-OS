@@ -3,6 +3,7 @@
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 use fixed_size_block::FixedSizeBlockAllocator;
+use buddy_allocator::BuddyAllocator;
 use x86_64::{
     VirtAddr,
     structures::paging::{
@@ -12,12 +13,14 @@ use x86_64::{
 
 pub mod bump;
 pub mod fixed_size_block;
+pub mod buddy_allocator;
 
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
+pub const HEAP_SIZE: usize = 512 * 1024;
 
 #[global_allocator]
-static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
+// static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
+static ALLOCATOR: Locked<BuddyAllocator> = Locked::new(BuddyAllocator::new());
 
 
 pub struct Dummy;
