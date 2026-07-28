@@ -38,6 +38,9 @@ impl BuddyAllocator{
             self.free_lists[i] = None;
         }
 
+        self.heap_start = heap_start;
+        self.heap_size = heap_size;
+
         println!("Heap start (raw): {:#x}", heap_start);
         println!("Heap size (raw):  {} bytes", heap_size);
 
@@ -45,43 +48,47 @@ impl BuddyAllocator{
             panic!("Heap size cannot be zero");
         }
 
-        let max_possible = heap_size.next_power_of_two() >> 1;
-        let mut candidate_size = if heap_size.is_power_of_two() {
-            heap_size
-        } else {
-            max_possible
-        };
-        candidate_size = candidate_size.min(1 << MAX_ORDER);
+        let heap_end = heap_start.saturating_add(heap_size);
+        let mut current = align_up(heap_start, 1 << MIN_ORDER);
 
-        let (aligned_start, adjusted_size) = loop {
-            if candidate_size < (1 << MIN_ORDER) {
-                panic!("Heap too small: cannot fit even a minimum-order block after alignment");
+        while current < heap_end{
+            let remaining = heap_end - current;
+            if remaining < (1 << MIN_ORDER){
+                break;
             }
 
-            let aligned = align_up(heap_start, candidate_size);
-            let end = heap_start.saturating_add(heap_size);
+            let align_limit = if current == 0 {
+                1 << MAX_ORDER
+            } else {
+                1usize << current.trailing_zeros()
+            };
 
-            if aligned <= end && candidate_size <= end - aligned {
-                break (aligned, candidate_size);
+            let size_limit = if remaining.is_power_of_two() {
+                remaining
+            } else {
+                remaining.next_power_of_two() >> 1
+            };
+
+            let block_size = align_limit.min(size_limit).min(1 << MAX_ORDER);
+
+            if block_size < (1 << MIN_ORDER) {
+                break;
             }
 
-            candidate_size >>= 1;
-        };
+            let order = match self.size_to_order(block_size) {
+                Some(o) => o,
+                None => panic!("Block size {} out of bounds", block_size),
+            };
 
-        let order = match self.size_to_order(adjusted_size) {
-            Some(o) => o,
-            None => panic!("Heap size {} out of bounds", adjusted_size),
-        };
+            println!(
+                "Adding free block at {:#x}, size {} (order {})",
+                current, block_size, order
+            );
 
-        debug_assert_eq!(aligned_start % adjusted_size, 0);
+            self.push_free_block(order, current as *mut u8);
 
-        println!("Heap start (aligned): {:#x}", aligned_start);
-        println!("Heap size (adjusted): {} bytes (order {})", adjusted_size, order);
-
-        self.heap_start = aligned_start;
-        self.heap_size = adjusted_size;
-
-        self.push_free_block(order, aligned_start as *mut u8);
+            current += block_size;
+        }
 
         self.print_free_lists();
     }
@@ -150,10 +157,6 @@ unsafe impl GlobalAlloc for Locked<BuddyAllocator>{
 
 impl BuddyAllocator {
     fn size_to_order(&self, size: usize) -> Option<usize> {
-        if size == 0 {
-            return Some(0);
-        }
-
         let mut block_size = size;
 
         if block_size < (1 << MIN_ORDER) {
@@ -204,31 +207,26 @@ impl BuddyAllocator {
         assert!(order < NUM_ORDERS, "pop_buddy_of: order out of bounds");
 
         let buddy_addr = self.buddy_of(address, order);
-        
-        if let Some(node) = self.free_lists[order].as_ref() {
-            if *node as *const ListNode as usize == buddy_addr {
-                return Some(self.pop_free_block(order));
-            }
-        }
-        
-        let mut prev: *mut ListNode = match self.free_lists[order].as_mut() {
-            Some(node) => *node as *mut ListNode,
-            None => return None,
-        };
-        
+
+        let mut slot: *mut Option<&'static mut ListNode> = &mut self.free_lists[order];
+
         loop {
-            let current: *mut ListNode = match (*prev).next.as_mut() {
-                Some(node) => *node as *mut ListNode,
-                None => return None,
+            let current = &mut *slot;
+
+            // Read the node pointer in a block so the mutable borrow ends
+            // before we potentially modify the slot.
+            let node_ptr: *mut ListNode = {
+                let node = current.as_mut()?;
+                *node as *mut ListNode
             };
-            
-            if current as usize == buddy_addr {
-                let current_ref = &mut *current;
-                (*prev).next = current_ref.next.take();
-                return Some(current as *mut u8);
+
+            if node_ptr as usize == buddy_addr {
+                let removed = current.take().unwrap();
+                *current = removed.next.take();
+                return Some(node_ptr as *mut u8);
             }
-            
-            prev = current;
+
+            slot = &mut (*node_ptr).next;
         }
     }
 
