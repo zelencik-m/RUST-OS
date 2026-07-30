@@ -1,3 +1,7 @@
+
+pub mod gdt;
+
+
 // src/interrupts.rs
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
@@ -8,7 +12,6 @@ use x86_64::structures::idt::PageFaultErrorCode;
 
 use crate::hlt_loop;
 use crate::println;
-use crate::gdt;
 use crate::print;
 
 pub const PIC_1_OFFSET: u8 = 32;

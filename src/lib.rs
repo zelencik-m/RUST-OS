@@ -9,16 +9,14 @@
 
 pub mod serial;
 pub mod vga_buffer;
-pub mod interrupts;
-pub mod gdt;
 pub mod memory;
-// pub mod allocator;
 pub mod task;
-// pub mod memory_manager;
+pub mod interrupts;
 
 extern crate alloc;
 
 use core::panic::PanicInfo;
+use interrupts::{gdt};
 
 #[cfg(test)]
 use bootloader::{entry_point, BootInfo};
