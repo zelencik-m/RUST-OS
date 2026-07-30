@@ -4,7 +4,6 @@ use alloc::alloc::{GlobalAlloc, Layout};
 
 use super::{Locked, align_up};
 use core::{ptr::null_mut};
-use core::mem;
 
 use super::super::super::{println, print};
 
