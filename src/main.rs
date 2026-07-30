@@ -8,9 +8,9 @@
 
 use core::panic::PanicInfo;
 use rust_os::{hlt_loop, println};
-use x86_64::VirtAddr;
 use rust_os::task::{Task, keyboard};
 use rust_os::task::executor::Executor;
+use rust_os::memory_manager::MemoryManager;
 
 use bootloader::{BootInfo, entry_point};
 
@@ -31,30 +31,22 @@ async fn example_task() {
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    use rust_os::allocator; // new import
-    use rust_os::memory::{self, BootInfoFrameAllocator};
 
     println!("Hello World{}", "!");
     rust_os::init();
 
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-
-    let mut frame_allocator = unsafe {
-        BootInfoFrameAllocator::init(&boot_info.memory_map)
+    let mut mm = unsafe {
+        MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
 
-    // new
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("heap initialization failed");
-
-
-        let heap_value = Box::new(41);
-    println!("heap_value at {:p}", heap_value);
+    mm.init_heap().expect("heap initialization failed");
 
     // ________________________________________________
     // demo
     // ________________________________________________
+    let heap_value = Box::new(41);
+    println!("heap_value at {:p}", heap_value);
+
     let mut vec = Vec::new();
     for i in 0..500 {
         vec.push(i);

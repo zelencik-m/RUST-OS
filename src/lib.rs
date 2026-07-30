@@ -12,8 +12,9 @@ pub mod vga_buffer;
 pub mod interrupts;
 pub mod gdt;
 pub mod memory;
-pub mod allocator;
+// pub mod allocator;
 pub mod task;
+pub mod memory_manager;
 
 extern crate alloc;
 
@@ -64,21 +65,16 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 }
 
 #[cfg(test)]
-fn test_kernel_main(boot_info: &'static BootInfo) -> ! {
-    use memory::BootInfoFrameAllocator;
-    use x86_64::VirtAddr;
-    
+fn test_kernel_main(boot_info: &'static BootInfo) -> ! { 
+    use crate::memory_manager::MemoryManager;
     init();
     
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe {
-        BootInfoFrameAllocator::init(&boot_info.memory_map)
+    let mut mm = unsafe {
+        MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
-    
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("heap initialization failed");
-    
+
+    mm.init_heap().expect("heap initialization failed");
+
     test_main();
     
     hlt_loop();

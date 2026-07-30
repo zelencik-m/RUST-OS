@@ -1,3 +1,5 @@
+// src/memory/allocator/bump.rs
+
 use super::{Locked, align_up};
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr;

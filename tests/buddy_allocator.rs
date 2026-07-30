@@ -19,8 +19,8 @@ use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
 
 use rust_os::{serial_print, serial_println};
-use rust_os::allocator::buddy_allocator::{BuddyAllocator};
-use rust_os::allocator::{Locked};
+use rust_os::memory::allocator::buddy_allocator::{BuddyAllocator};
+use rust_os::memory::allocator::{Locked};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
