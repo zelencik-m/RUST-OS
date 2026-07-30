@@ -10,7 +10,7 @@ use core::panic::PanicInfo;
 use rust_os::{hlt_loop, println};
 use rust_os::task::{Task, keyboard};
 use rust_os::task::executor::Executor;
-use rust_os::memory_manager::MemoryManager;
+use rust_os::memory::memory_manager::MemoryManager;
 
 use bootloader::{BootInfo, entry_point};
 

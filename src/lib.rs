@@ -14,7 +14,7 @@ pub mod gdt;
 pub mod memory;
 // pub mod allocator;
 pub mod task;
-pub mod memory_manager;
+// pub mod memory_manager;
 
 extern crate alloc;
 
@@ -66,7 +66,7 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 
 #[cfg(test)]
 fn test_kernel_main(boot_info: &'static BootInfo) -> ! { 
-    use crate::memory_manager::MemoryManager;
+    use memory::memory_manager::MemoryManager;
     init();
     
     let mut mm = unsafe {
