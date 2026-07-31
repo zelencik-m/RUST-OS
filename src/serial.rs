@@ -1,27 +1,26 @@
 // src/serial.rs
 
-use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
-use spin::Mutex;
+use core::fmt;
 use lazy_static::lazy_static;
+use spin::Mutex;
+use uart_16550::SerialPort;
 
 lazy_static! {
-    pub static ref SERIAL1: Mutex<Uart16550Tty<PioBackend>> = Mutex::new(unsafe {
-        Uart16550Tty::new_port(0x3F8, Config::default())
-            .expect("failed to initialize UART")
-    });
+    pub static ref SERIAL1: Mutex<SerialPort> = {
+        let mut serial = unsafe { SerialPort::new(0x3F8) };
+        serial.init();
+        Mutex::new(serial)
+    };
 }
 
 #[doc(hidden)]
-pub fn _print(args: ::core::fmt::Arguments) {
+pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    use x86_64::instructions::interrupts;
 
-    interrupts::without_interrupts(|| {
-        SERIAL1
-            .lock()
-            .write_fmt(args)
-            .expect("Printing to serial failed");
-    });
+    SERIAL1
+        .lock()
+        .write_fmt(args)
+        .expect("serial output failed");
 }
 
 /// Prints to the host through the serial interface.

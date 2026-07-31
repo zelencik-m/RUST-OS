@@ -11,6 +11,7 @@ use rust_os::{hlt_loop, println};
 use rust_os::task::{Task, keyboard};
 use rust_os::task::executor::Executor;
 use rust_os::memory::memory_manager::MemoryManager;
+use rust_os::debug;
 
 use bootloader::{BootInfo, entry_point};
 
@@ -34,6 +35,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     println!("Hello World{}", "!");
     rust_os::init();
+    
+    debug!("Loading ");
 
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
@@ -62,7 +65,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ________________________________________________
 
 
-   let mut executor = Executor::new(); // new
+   let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run();
