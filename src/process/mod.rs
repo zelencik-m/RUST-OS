@@ -1,11 +1,14 @@
 // src/process/mod.rs
 
 pub mod process_manager;
+pub mod thread;
 
 use alloc::rc::{Rc, Weak};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
+
+use crate::process::thread::{TID, ThreadState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PID(pub u64);
@@ -21,10 +24,10 @@ impl PID {
 }
 
 enum ProcessState{
-    NEW,
-    RUNNING,
-    EXITED,
-    DESTROYED,
+    New,
+    Running,
+    Exited,
+    Destroyed,
 }
 
 pub enum ProcessType{
@@ -45,9 +48,10 @@ struct ProcessContext{
 
 }
 
-pub struct Process{
+pub struct Process {
     identity: ProcessIdentity,
-    context: ProcessContext,
+
+    threads: Vec<TID>,
 }
 
 impl Process {
@@ -55,15 +59,13 @@ impl Process {
             Self{ 
                 identity: ProcessIdentity {
                     pid: pid, 
-                    process_state: ProcessState::NEW , 
+                    process_state: ProcessState::New , 
                     parent: Some(parent), 
                     process_type: process_type,
                     name: name, 
                     children: Vec::new(),
                 }, 
-                context: ProcessContext {
-
-                } 
+                threads: Vec::new(),
             }
     }
 }
