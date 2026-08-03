@@ -55,6 +55,12 @@ unsafe impl Send for Thread {}
 
 impl Thread {
     pub fn new(tid: TID, owner: PID, stack_size: usize, entry: extern "C" fn() -> !) -> Self {
+        
+        assert!(
+            stack_size != 0 && stack_size % 16 == 0, 
+            "Stack size must be a non-zero multiple of 16"
+        );    
+
         let layout = Layout::from_size_align(stack_size, 16).unwrap();
         let raw = unsafe { alloc_zeroed(layout) };
         assert!(!raw.is_null(), "thread stack allocation failed");

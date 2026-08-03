@@ -34,17 +34,24 @@ impl ProcessManager {
         }
     }
 
-    pub fn create_process(&mut self, parent: PID, name: String) -> PID {
+    pub fn create_process(
+        &mut self,
+        parent: PID,
+        name: String,
+        process_type: ProcessType,
+    ) -> PID {
         let new_pid = if let Some(free_index) = self.processes.iter().position(|p| p.is_none()) {
             let pid = PID(free_index as u64);
-            self.processes[free_index] = Some(Process::new(pid, parent, name, ProcessType::User));
+            self.processes[free_index] =
+                Some(Process::new(pid, parent, name, process_type));
             pid
         } else {
             let pid = PID(self.processes.len() as u64);
-            self.processes.push(Some(Process::new(pid, parent, name, ProcessType::User)));
+            self.processes.push(
+                Some(Process::new(pid, parent, name, process_type))
+            );
             pid
         };
-
         new_pid
     }
 
@@ -70,12 +77,43 @@ impl ProcessManager {
         new_tid
     }
 
+    /// Idempotent: ensures PID(0) exists and represents the kernel.
+    pub fn init_kernel_process(&mut self) -> PID {
+        if self.processes.first().map(|p| p.is_some()).unwrap_or(false) {
+            return PID(0);
+        }
+        // PID(0) is the kernel; its parent is itself (or you could use None).
+        self.processes.push(Some(Process::new(
+            PID(0),
+            PID(0),
+            String::from("kernel"),
+            ProcessType::Kernel,
+        )));
+        PID(0)
+    }
+
+    /// Convenience: create a kernel-mode process as a child of PID(0).
+    pub fn create_kernel_process(&mut self, name: String) -> PID {
+        self.create_process(PID(0), name, ProcessType::Kernel)
+    }
+
+    /// Convenience: create a user-mode process as a child of PID(0).
+    pub fn create_user_process(&mut self, name: String) -> PID {
+        self.create_process(PID(0), name, ProcessType::User)
+    }
+
     /// Prepares bookkeeping and returns the raw (old, new) context pointers
     /// needed to perform the actual switch. Must be called while holding
     /// the lock; the returned pointers remain valid because `threads` is
     /// stable storage (no reallocation happens between this call and the
     /// switch, since we're not calling create_thread concurrently).
     fn prepare_switch(&mut self, tid: TID) -> (*mut ThreadContext, *const ThreadContext) {
+        if Some(tid) == self.current {
+            let t = self.threads[tid.0 as usize].as_ref().unwrap();
+            let ctx = t.context_ptr() as *mut ThreadContext;
+            return (ctx, ctx);
+        }
+
         let new_ctx: *const ThreadContext = {
             let t = self.threads[tid.0 as usize].as_mut().unwrap();
             t.set_state(ThreadState::Running);
@@ -106,6 +144,9 @@ impl ProcessManager {
 /// other thread switches back, so holding the lock across it would
 /// deadlock anyone else who needs to touch the process manager meanwhile.
 pub fn switch_to(tid: TID) {
+    
+    unsafe { core::arch::asm!("cli", options(nostack, preserves_flags)); }
+
     let (old_ctx, new_ctx) = {
         let mut pm = PROCESS_MANAGER.lock();
         pm.prepare_switch(tid)

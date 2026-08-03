@@ -37,8 +37,8 @@ use rust_os::process::process_manager::{PROCESS_MANAGER, switch_to};
 use rust_os::process::PID;
 use rust_os::process::thread::TID;
 
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
+fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("Hello World{}", "!");
     rust_os::init();
     
@@ -47,52 +47,36 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
-
     mm.init_heap().expect("heap initialization failed");
 
     // ________________________________________________
-    // demo
+    // Process & Thread Setup
     // ________________________________________________
-    let heap_value = Box::new(41);
-    println!("heap_value at {:p}", heap_value);
-
-    let mut vec = Vec::new();
-    for i in 0..500 {
-        vec.push(i);
-    }
-    println!("vec at {:p}", vec.as_slice());
-
-    // create a reference counted vector -> will be freed when count reaches 0
-    let reference_counted = Rc::new(vec![1, 2, 3]);
-    let cloned_reference = reference_counted.clone();
-    println!("current reference count is {}", Rc::strong_count(&cloned_reference));
-    core::mem::drop(reference_counted);
-    println!("reference count is {} now", Rc::strong_count(&cloned_reference));
-    // ________________________________________________
-
-
     {
         let mut pm = PROCESS_MANAGER.lock();
-        let pid = pm.create_process(PID(0), "test".into());
-        let tid_a = pm.create_thread(pid, thread_a);
-        let tid_b = pm.create_thread(pid, thread_b);
-        assert_eq!(tid_a, TID(0));
-        assert_eq!(tid_b, TID(1));
-    } // <-- lock guard `pm` dropped here, explicitly, before switching
+        
+        // 1. Bootstrap the kernel process (PID 0)
+        let kpid = pm.init_kernel_process();
 
+        // 2. Create the main kernel thread that will run the async executor
+        let tid_init = pm.create_thread(kpid, kernel_init_thread);
+
+        // 3. Create a user process with two test threads
+        let upid = pm.create_user_process("test".into());
+        let tid_a = pm.create_thread(upid, thread_a);
+        let tid_b = pm.create_thread(upid, thread_b);
+
+        // Optional: verify TIDs
+        assert_eq!(tid_init, TID(0));
+        assert_eq!(tid_a, TID(1));
+        assert_eq!(tid_b, TID(2));
+    } // lock dropped here
+
+    // Hand off execution to the kernel init thread. 
+    // This call will never return to kernel_main.
     switch_to(TID(0));
-    loop {}
-
-
-    let mut executor = Executor::new();
-    executor.spawn(Task::new(example_task()));
-    executor.spawn(Task::new(keyboard::print_keypresses()));
-    executor.run();
-
-
-    #[cfg(test)]
-    test_main();
-
+    
+    // If switch_to ever returns, halt the CPU.
     rust_os::hlt_loop();
 }
 
@@ -116,7 +100,7 @@ extern "C" fn thread_a() -> ! {
     loop {
         counter += 1;
         println!("A (counter={})", counter);
-        switch_to(TID(1));
+        switch_to(TID(2));
     }
 }
 
@@ -125,6 +109,30 @@ extern "C" fn thread_b() -> ! {
     loop {
         counter += 1;
         println!("B (counter={})", counter);
-        switch_to(TID(0));
+        switch_to(TID(1));
     }
+}
+
+extern "C" fn kernel_worker() -> ! {
+    let mut ticks: u64 = 0;
+    loop {
+        ticks += 1;
+        println!("[kernel worker] tick={}", ticks);
+        // Alternate through the user threads.
+        switch_to(TID(1));
+    }
+}
+
+// This is the main "background" thread of your kernel
+extern "C" fn kernel_init_thread() -> ! {
+    println!("Kernel init thread started. Running Async Executor...");
+    
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(example_task()));
+    executor.spawn(Task::new(keyboard::print_keypresses()));
+    
+    // This blocks forever, running async tasks.
+    // If you want thread_a and thread_b to still run, you would need to 
+    // integrate the scheduler with the executor (e.g., yielding here).
+    executor.run();
 }
