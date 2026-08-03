@@ -14,6 +14,7 @@ use rust_os::memory::memory_manager::MemoryManager;
 use rust_os::debug;
 
 use bootloader::{BootInfo, entry_point};
+use alloc::string::{String, ToString};
 
 extern crate alloc;
 
@@ -30,6 +31,11 @@ async fn example_task() {
 
 
 entry_point!(kernel_main);
+
+
+use rust_os::process::process_manager::{PROCESS_MANAGER, switch_to};
+use rust_os::process::PID;
+use rust_os::process::thread::TID;
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
@@ -65,11 +71,23 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // ________________________________________________
 
 
-   let mut executor = Executor::new();
+    {
+        let mut pm = PROCESS_MANAGER.lock();
+        let pid = pm.create_process(PID(0), "test".into());
+        let tid_a = pm.create_thread(pid, thread_a);
+        let tid_b = pm.create_thread(pid, thread_b);
+        assert_eq!(tid_a, TID(0));
+        assert_eq!(tid_b, TID(1));
+    } // <-- lock guard `pm` dropped here, explicitly, before switching
+
+    switch_to(TID(0));
+    loop {}
+
+
+    let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
     executor.run();
-
 
 
     #[cfg(test)]
@@ -91,4 +109,22 @@ fn panic(info: &PanicInfo) -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     rust_os::test_panic_handler(info)
+}
+
+extern "C" fn thread_a() -> ! {
+    let mut counter: u64 = 0;
+    loop {
+        counter += 1;
+        println!("A (counter={})", counter);
+        switch_to(TID(1));
+    }
+}
+
+extern "C" fn thread_b() -> ! {
+    let mut counter: u64 = 0;
+    loop {
+        counter += 1;
+        println!("B (counter={})", counter);
+        switch_to(TID(0));
+    }
 }

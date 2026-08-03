@@ -23,7 +23,8 @@ impl PID {
     }
 }
 
-enum ProcessState{
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState{
     New,
     Running,
     Exited,
@@ -51,7 +52,7 @@ struct ProcessContext{
 pub struct Process {
     identity: ProcessIdentity,
 
-    threads: Vec<TID>,
+    pub threads: Vec<TID>,
 }
 
 impl Process {
@@ -67,5 +68,13 @@ impl Process {
                 }, 
                 threads: Vec::new(),
             }
+    }
+
+    pub fn get_state(&self) -> ProcessState {
+        self.identity.process_state
+    }
+
+    pub fn set_state(&mut self, new_state: ProcessState) {
+        self.identity.process_state = new_state;
     }
 }
