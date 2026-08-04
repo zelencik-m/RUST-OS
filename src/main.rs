@@ -134,5 +134,8 @@ extern "C" fn kernel_init_thread() -> ! {
     // This blocks forever, running async tasks.
     // If you want thread_a and thread_b to still run, you would need to 
     // integrate the scheduler with the executor (e.g., yielding here).
+    
+    switch_to(TID(1)); // Start with thread_a
+    
     executor.run();
 }

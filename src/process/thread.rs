@@ -22,7 +22,10 @@ impl TID {
 pub enum ThreadState {
     Ready,
     Running,
+    Sleeping,
     Blocked,
+    Waiting,
+    Zombie,
     Exited,
 }
 

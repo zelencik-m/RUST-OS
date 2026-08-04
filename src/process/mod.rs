@@ -23,14 +23,6 @@ impl PID {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessState{
-    New,
-    Running,
-    Exited,
-    Destroyed,
-}
-
 pub enum ProcessType{
     Kernel,
     User,
@@ -38,7 +30,6 @@ pub enum ProcessType{
 
 pub struct ProcessIdentity{
     pid: PID,
-    process_state: ProcessState,
     name:String,
     process_type: ProcessType,
     parent: Option<PID>, 
@@ -60,7 +51,6 @@ impl Process {
             Self{ 
                 identity: ProcessIdentity {
                     pid: pid, 
-                    process_state: ProcessState::New , 
                     parent: Some(parent), 
                     process_type: process_type,
                     name: name, 
@@ -70,11 +60,12 @@ impl Process {
             }
     }
 
-    pub fn get_state(&self) -> ProcessState {
-        self.identity.process_state
+    pub fn add_child(&mut self, child_pid: PID) {
+        self.identity.children.push(child_pid);
     }
 
-    pub fn set_state(&mut self, new_state: ProcessState) {
-        self.identity.process_state = new_state;
+    pub fn get_children(&self) -> &Vec<PID> {
+        &self.identity.children
     }
+    
 }
