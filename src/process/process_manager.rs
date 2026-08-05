@@ -8,18 +8,21 @@ use spin::Mutex;
 
 use crate::process::thread::{self, TID, Thread, ThreadContext, ThreadState};
 use crate::process::{PID, Process, ProcessType};
+use crate::scheduler::scheduler::Scheduler;  
+use crate::{println, scheduler};
 
-use crate::println;
+
+use crate::scheduler::scheduler::SCHEDULER;
 
 pub struct ProcessManager {
     processes: Vec<Option<Process>>,
     threads: Vec<Option<Box<Thread>>>, 
-    runnables: VecDeque<TID>,
+    // runnables: VecDeque<TID>,
 
     free_pids: Vec<PID>,
     free_tids: Vec<TID>,
 
-    current: Option<TID>,
+    // current: Option<TID>,
     kernel_context: ThreadContext,
 }
 
@@ -32,10 +35,8 @@ impl ProcessManager {
         ProcessManager {
             processes: Vec::new(),
             threads: Vec::new(),
-            runnables: VecDeque::new(),
             free_pids: Vec::new(),
             free_tids: Vec::new(),
-            current: None,
             kernel_context: ThreadContext::zeroed(),
         }
     }
@@ -77,7 +78,7 @@ impl ProcessManager {
 
         // Use the new accessor to attach the TID to the process.
         self.process_mut(pid).threads.push(tid);
-        self.runnables.push_back(tid);
+        SCHEDULER.lock().add_runnable(tid);
         tid
     }
 
@@ -125,15 +126,8 @@ impl ProcessManager {
         // Clear slot and recycle TID; the old Box is dropped here, freeing memory
         self.threads[tid.0 as usize] = None;
         self.free_tids.push(tid);
-    }
 
-    fn next_runnable(&mut self) -> Option<TID> {
-        while let Some(tid) = self.runnables.pop_front() {
-            if self.threads[tid.0 as usize].is_some() {
-                return Some(tid);
-            }
-        }
-        None
+        SCHEDULER.lock().remove_from_runnables(tid);
     }
 
     /// Prepares bookkeeping and returns the raw (old, new) context pointers
@@ -141,8 +135,10 @@ impl ProcessManager {
     /// the lock; the returned pointers remain valid because `threads` is
     /// stable storage (no reallocation happens between this call and the
     /// switch, since we're not calling create_thread concurrently).
-    fn prepare_switch(&mut self, tid: TID) -> (*mut ThreadContext, *const ThreadContext) {
-        if Some(tid) == self.current {
+    pub fn prepare_switch(&mut self, scheduler: &mut Scheduler, tid: TID)
+            -> (*mut ThreadContext, *const ThreadContext)
+    {
+        if Some(tid) == scheduler.current {
             let t = self.thread(tid);
             let ctx = t.context_ptr() as *mut ThreadContext;
             return (ctx, ctx);
@@ -154,7 +150,7 @@ impl ProcessManager {
             t.context_ptr()
         };
 
-        let old_ctx: *mut ThreadContext = match self.current {
+        let old_ctx: *mut ThreadContext = match scheduler.current {
             Some(cur) => {
                 let t = self.thread_mut(cur);
                 if t.get_state() == ThreadState::Running {
@@ -165,7 +161,7 @@ impl ProcessManager {
             None => &mut self.kernel_context as *mut _,
         };
 
-        self.current = Some(tid);
+        scheduler.current = Some(tid);
         (old_ctx, new_ctx)
     }
 
@@ -209,16 +205,11 @@ impl ProcessManager {
 /// other thread switches back, so holding the lock across it would
 /// deadlock anyone else who needs to touch the process manager meanwhile.
 pub fn switch_to(tid: TID) {
-    
-    // unsafe { core::arch::asm!("cli", options(nostack, preserves_flags)); }
-
-    let (old_ctx, new_ctx) = {
-        let mut pm = PROCESS_MANAGER.lock();
-        pm.prepare_switch(tid)
-        // `pm` (the MutexGuard) is dropped HERE, at the end of this block,
-        // BEFORE we touch the actual asm switch below.
-    };
-
+    let mut scheduler = SCHEDULER.lock();
+    let mut pm = PROCESS_MANAGER.lock();
+    let (old_ctx, new_ctx) = pm.prepare_switch(&mut *scheduler, tid);
+    drop(scheduler);
+    drop(pm);
     unsafe {
         thread::switch_context(old_ctx, new_ctx);
     }

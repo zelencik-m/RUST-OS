@@ -7,7 +7,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use rust_os::{hlt_loop, println};
+use rust_os::{hlt_loop, print, println};
 use rust_os::task::{Task, keyboard};
 use rust_os::task::executor::Executor;
 use rust_os::memory::memory_manager::MemoryManager;
@@ -34,6 +34,7 @@ entry_point!(kernel_main);
 
 
 use rust_os::process::process_manager::{PROCESS_MANAGER, switch_to};
+use rust_os::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now};
 use rust_os::process::PID;
 use rust_os::process::thread::TID;
 
@@ -74,8 +75,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // Hand off execution to the kernel init thread. 
     // This call will never return to kernel_main.
+    // switch_to(TID(0));
     switch_to(TID(0));
-    
+
     // If switch_to ever returns, halt the CPU.
     rust_os::hlt_loop();
 }
@@ -98,18 +100,30 @@ fn panic(info: &PanicInfo) -> ! {
 extern "C" fn thread_a() -> ! {
     let mut counter: u64 = 0;
     loop {
-        counter += 1;
-        println!("A (counter={})", counter);
-        switch_to(TID(2));
+        println!("executing thread A (counter={})", counter);
+        loop{
+            // println!("thread A (counter={})", counter);
+            counter += 1;
+            if counter % 1000000 == 0 {
+                break;
+            }
+        }
+        yield_now();
     }
 }
 
 extern "C" fn thread_b() -> ! {
     let mut counter: u64 = 100000000;
     loop {
-        counter -= 1;
-        println!("B (counter={})", counter);
-        switch_to(TID(1));
+        println!("executing thread B (counter={})", counter);
+        loop{
+            // println!("thread B (counter={})", counter);
+            counter -= 1;
+            if counter % 1000000 == 0 {
+                break;
+            }
+        }
+        yield_now();
     }
 }
 
@@ -117,7 +131,7 @@ extern "C" fn kernel_worker() -> ! {
     let mut ticks: u64 = 0;
     loop {
         ticks += 1;
-        println!("[kernel worker] tick={}", ticks);
+        // println!("[kernel worker] tick={}", ticks);
         // Alternate through the user threads.
         switch_to(TID(1));
     }
