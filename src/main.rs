@@ -105,9 +105,9 @@ extern "C" fn thread_a() -> ! {
 }
 
 extern "C" fn thread_b() -> ! {
-    let mut counter: u64 = 0;
+    let mut counter: u64 = 100000000;
     loop {
-        counter += 1;
+        counter -= 1;
         println!("B (counter={})", counter);
         switch_to(TID(1));
     }
