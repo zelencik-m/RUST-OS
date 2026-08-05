@@ -7,6 +7,7 @@ use spin::Mutex;
 use crate::process::process_manager::{ProcessManager, switch_to, PROCESS_MANAGER};
 use crate::println;
 
+const TIME_SLICE: u64 = 2; // Number of ticks before a thread is preempted
 
 lazy_static! {
     pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
@@ -15,6 +16,7 @@ lazy_static! {
 pub struct Scheduler {
     pub current: Option<TID>,
     pub runnables: VecDeque<TID>,
+    pub tick_count: u64,
     // Optionally: the kernel context could stay in ProcessManager,
     // but if you prefer you can move it here as well.
 }
@@ -24,6 +26,7 @@ impl Scheduler {
         Scheduler {
             current: None,
             runnables: VecDeque::new(),
+            tick_count: 0,
         }
     }
 
@@ -57,12 +60,24 @@ impl Scheduler {
         }
         self.next_runnable()
     }
+
+    pub fn tick(&mut self) -> bool {
+        // println!("Tick: {}", self.tick_count);
+        self.tick_count = self.tick_count.wrapping_add(1);
+        if self.tick_count % TIME_SLICE == 0 {
+            true // signal: time to reschedule
+        } else {
+            false
+        }
+    }
+
 }
 
 pub fn schedule() {
     let next = SCHEDULER.lock().requeue_and_pick_next(); // lock released here
     if let Some(tid) = next {
-        // println!("Switching to thread {:?}", tid);
+        println!("Switching to thread {:?}", tid);
+        println!("Queue: {:?}", SCHEDULER.lock().runnables);
         switch_to(tid);
     }
 }

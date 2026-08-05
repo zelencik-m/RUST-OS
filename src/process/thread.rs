@@ -58,11 +58,10 @@ unsafe impl Send for Thread {}
 
 impl Thread {
     pub fn new(tid: TID, owner: PID, stack_size: usize, entry: extern "C" fn() -> !) -> Self {
-        
         assert!(
-            stack_size != 0 && stack_size % 16 == 0, 
+            stack_size != 0 && stack_size % 16 == 0,
             "Stack size must be a non-zero multiple of 16"
-        );    
+        );
 
         let layout = Layout::from_size_align(stack_size, 16).unwrap();
         let raw = unsafe { alloc_zeroed(layout) };
@@ -73,16 +72,35 @@ impl Thread {
         let stack_top = (raw as u64 + stack_size as u64) & !0xF;
         let entry_addr = entry as usize as u64;
 
-        // Fake "return address" slot the initial `ret` in switch_context
-        // will pop into rip.
-        let entry_slot = stack_top - 16;
+        // Fake initial stack frame, laid out to match switch_context's
+        // push/pop order in reverse (since switch_context pops back-to-front):
+        //
+        //   switch_context pushes:  rflags, rbp, rbx, r12, r13, r14, r15
+        //   switch_context pops:    r15, r14, r13, r12, rbx, rbp, rflags
+        //   then: ret  (pops the fake "return address" -> entry_addr)
+        //
+        // So from stack_top downward, memory must contain (high -> low):
+        //   [stack_top - 8]  = entry_addr   (consumed by `ret`)
+        //   [stack_top - 16] = rflags       (consumed by `popfq`)
+        //   [stack_top - 24] = rbp
+        //   [stack_top - 32] = rbx
+        //   [stack_top - 40] = r12
+        //   [stack_top - 48] = r13
+        //   [stack_top - 56] = r14
+        //   [stack_top - 64] = r15          <- rsp starts here
+        let entry_slot  = stack_top - 8;
+        let rflags_slot = stack_top - 16;
+
         unsafe {
             *(entry_slot as *mut u64) = entry_addr;
+            // IF (bit 9) set so the thread starts with interrupts enabled;
+            // bit 1 is reserved and always set on real hardware.
+            *(rflags_slot as *mut u64) = 0x202;
         }
 
-        // rsp points below 6 fake pushed registers (r15,r14,r13,r12,rbx,rbp)
-        // that switch_context's pop sequence will consume, landing rsp at
-        // entry_slot right before the ret.
+        // rbp, rbx, r12, r13, r14, r15 slots (stack_top-24 .. stack_top-64)
+        // are left as zero from alloc_zeroed — fine as initial dummy values.
+
         let rsp = stack_top - 64;
 
         Thread {
@@ -129,6 +147,7 @@ impl Drop for Thread {
 global_asm!(
     ".global switch_context",
     "switch_context:",
+    "pushfq",
     "push rbp",
     "push rbx",
     "push r12",
@@ -143,6 +162,7 @@ global_asm!(
     "pop r12",
     "pop rbx",
     "pop rbp",
+    "popfq",
     "ret",
 );
 

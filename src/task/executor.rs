@@ -32,6 +32,7 @@ impl Executor {
     pub fn run(&mut self) -> ! {
         loop {
             self.run_ready_tasks();
+            // yield_now();
             self.sleep_if_idle();
         }
     }
@@ -69,7 +70,6 @@ impl Executor {
 
         interrupts::disable();
         if self.task_queue.is_empty() {
-            yield_now();
             enable_and_hlt();
         } else {
             interrupts::enable();

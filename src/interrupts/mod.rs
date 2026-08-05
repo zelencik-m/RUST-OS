@@ -13,6 +13,8 @@ use x86_64::structures::idt::PageFaultErrorCode;
 use crate::hlt_loop;
 use crate::println;
 use crate::print;
+use crate::scheduler::scheduler::schedule;
+use crate::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now};
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -95,16 +97,16 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     }
 }
 
-extern "x86-interrupt" fn timer_interrupt_handler(
-    _stack_frame: InterruptStackFrame)
-{
-    print!(".");
-    
+extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let should_switch = SCHEDULER.lock().tick(); // lock dropped immediately
+
     unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 
+    if should_switch {
+        yield_now(); // safe now: PIC EOI already sent, lock already released
+    }
 }
 
 extern "x86-interrupt" fn breakpoint_handler(

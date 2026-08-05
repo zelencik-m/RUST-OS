@@ -76,7 +76,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // Hand off execution to the kernel init thread. 
     // This call will never return to kernel_main.
     // switch_to(TID(0));
-    switch_to(TID(0));
+    // switch_to(TID(0));
 
     // If switch_to ever returns, halt the CPU.
     rust_os::hlt_loop();
@@ -104,26 +104,37 @@ extern "C" fn thread_a() -> ! {
         loop{
             // println!("thread A (counter={})", counter);
             counter += 1;
-            if counter % 1000000 == 0 {
+            if counter % 100 == 0 {
                 break;
             }
         }
-        yield_now();
+        // yield_now();
     }
 }
 
 extern "C" fn thread_b() -> ! {
     let mut counter: u64 = 100000000;
+    let mut subtracting = true;
     loop {
         println!("executing thread B (counter={})", counter);
         loop{
             // println!("thread B (counter={})", counter);
+            if subtracting {
+                counter -= 1;
+            } else {
+                counter += 1;
+            }
+            if counter == 0 {
+                subtracting = false;
+            } else if counter == 100000000 {
+                subtracting = true;
+            }
             counter -= 1;
-            if counter % 1000000 == 0 {
+            if counter % 100 == 0 {
                 break;
             }
         }
-        yield_now();
+        // yield_now();
     }
 }
 
@@ -149,7 +160,7 @@ extern "C" fn kernel_init_thread() -> ! {
     // If you want thread_a and thread_b to still run, you would need to 
     // integrate the scheduler with the executor (e.g., yielding here).
     
-    switch_to(TID(1)); // Start with thread_a
+    // switch_to(TID(1)); // Start with thread_a
     
     executor.run();
 }
