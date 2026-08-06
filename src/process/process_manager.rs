@@ -214,3 +214,68 @@ pub fn switch_to(tid: TID) {
         thread::switch_context(old_ctx, new_ctx);
     }
 }
+
+
+impl ProcessManager {
+
+    pub fn run_thread(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_running(); // asserts state == Ready
+    }
+
+    /// Transition a thread from Running → Blocked and remove it from the run queue.
+    pub fn block_thread(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_blocked(); // asserts state == Running
+    }
+
+    /// Transition a thread from Running → Sleeping and remove it from the run queue.
+    pub fn sleep_thread(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_sleeping();
+    }
+
+    /// Transition a thread from Running → Waiting and remove it from the run queue.
+    pub fn wait_thread(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_waiting();
+    }
+
+    // --- Wake (Blocked/Sleeping/Waiting → Ready) ---
+
+    /// Transition a thread from Blocked/Sleeping/Waiting → Ready and add it to the run queue.
+    pub fn wake_thread(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_ready(); // asserts state is Blocked, Sleeping, or Waiting
+    }
+
+    // --- Exit (Running → Exited) ---
+
+    /// Transition a thread from Running → Exited and remove it from the run queue.
+    pub fn exit_thread(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_exited(); // asserts state == Running
+    }
+
+    // --- Zombie (Exited → Zombie) ---
+
+    /// Transition a thread from Exited → Zombie (no scheduler change).
+    pub fn set_zombie(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_zombie(); // asserts state == Exited
+    }
+
+    pub fn get_thread_state(&self, tid: TID) -> ThreadState {
+        self.thread(tid).get_state()
+    }
+
+    pub fn set_thread_ready(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.set_to_ready(); // asserts state is Blocked, Sleeping, or Waiting
+    }
+
+    pub fn preempt_thread(&mut self, tid: TID) {
+        let thread = self.thread_mut(tid);
+        thread.preempt_to_ready(); // asserts state == Running
+    }
+}

@@ -5,7 +5,9 @@ use crate::process::thread::ThreadContext;
 use lazy_static::lazy_static;
 use spin::Mutex;
 use crate::process::process_manager::{ProcessManager, switch_to, PROCESS_MANAGER};
+use crate::process::thread::ThreadState;
 use crate::println;
+use x86_64::instructions::interrupts;
 
 const TIME_SLICE: u64 = 2; // Number of ticks before a thread is preempted
 
@@ -13,10 +15,17 @@ lazy_static! {
     pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SleepThread{
+    tid:TID,
+    wakeup_tick:u64,
+}
+
 pub struct Scheduler {
     pub current: Option<TID>,
     pub runnables: VecDeque<TID>,
-    pub tick_count: u64,
+    pub tick_count: u64,    
+    pub sleep_queue: VecDeque<SleepThread>,
     // Optionally: the kernel context could stay in ProcessManager,
     // but if you prefer you can move it here as well.
 }
@@ -27,6 +36,7 @@ impl Scheduler {
             current: None,
             runnables: VecDeque::new(),
             tick_count: 0,
+            sleep_queue: VecDeque::new(),
         }
     }
 
@@ -55,10 +65,54 @@ impl Scheduler {
     }
 
     fn requeue_and_pick_next(&mut self) -> Option<TID> {
-        if let Some(cur) = self.current {     // read, don't take
-            self.runnables.push_back(cur);
+        if let Some(cur) = self.current {
+            let mut pm = PROCESS_MANAGER.lock();
+            let state = pm.get_thread_state(cur);
+            if state == ThreadState::Running {
+                pm.preempt_thread(cur);          // <-- was pm.set_thread_ready(cur)
+                drop(pm);
+                self.runnables.push_back(cur);
+            } else if state == ThreadState::Ready {
+                drop(pm);
+                self.runnables.push_back(cur);
+            }
         }
-        self.next_runnable()
+
+        let mut remaining = self.sleep_queue.len();
+        while remaining > 0 {
+            if let Some(sleep_thread) = self.sleep_queue.pop_front() {
+                remaining -= 1;
+                let mut pm = PROCESS_MANAGER.lock();
+                if self.tick_count >= sleep_thread.wakeup_tick
+                    && pm.get_thread_state(sleep_thread.tid) == ThreadState::Sleeping
+                {
+                    // Wake the thread: set state to Ready and add to run queue
+                    pm.set_thread_ready(sleep_thread.tid);
+                    drop(pm);
+                    self.add_runnable(sleep_thread.tid);
+                } else {
+                    self.sleep_queue.push_back(sleep_thread);
+                }
+            }
+        }
+
+        // Pick next runnable thread. Don't silently drop TIDs that
+        // aren't Ready yet — put them back at the tail instead.
+        let mut scanned = 0;
+        let total = self.runnables.len();
+        while scanned < total {
+            if let Some(next) = self.next_runnable() {
+                let pm = PROCESS_MANAGER.lock();
+                if pm.get_thread_state(next) == ThreadState::Ready {
+                    return Some(next);
+                } else {
+                    drop(pm);
+                    self.runnables.push_back(next); // don't lose it
+                }
+            }
+            scanned += 1;
+        }
+        None
     }
 
     pub fn tick(&mut self) -> bool {
@@ -73,15 +127,37 @@ impl Scheduler {
 
 }
 
+
 pub fn schedule() {
-    let next = SCHEDULER.lock().requeue_and_pick_next(); // lock released here
-    if let Some(tid) = next {
-        println!("Switching to thread {:?}", tid);
-        println!("Queue: {:?}", SCHEDULER.lock().runnables);
-        switch_to(tid);
-    }
+    interrupts::without_interrupts(|| {
+        let mut scheduler = SCHEDULER.lock();
+        let next = scheduler.requeue_and_pick_next();
+        if let Some(tid) = next {
+            println!("Switching to thread {:?}", tid);
+            println!("Queue: {:?}", scheduler.runnables);
+            drop(scheduler); // release before touching PROCESS_MANAGER/switch_to
+            PROCESS_MANAGER.lock().run_thread(tid);
+            switch_to(tid);
+        }
+    });
 }
 
 pub fn yield_now() {
+    schedule();
+}
+
+pub fn sleep(ticks: u64) {
+    interrupts::without_interrupts(|| {
+        let mut scheduler = SCHEDULER.lock();
+        if let Some(current_tid) = scheduler.get_current() {
+            println!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
+            let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
+            scheduler.sleep_queue.push_back(SleepThread { tid: current_tid, wakeup_tick });
+            PROCESS_MANAGER.lock().sleep_thread(current_tid);
+            drop(scheduler);
+        } else {
+            panic!("No current thread to sleep");
+        }
+    });
     schedule();
 }

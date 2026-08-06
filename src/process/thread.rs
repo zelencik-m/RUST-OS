@@ -169,3 +169,110 @@ global_asm!(
 extern "C" {
     pub fn switch_context(old: *mut ThreadContext, new: *const ThreadContext);
 }
+
+//           +---------+
+//           |  Ready  |
+//           +----+----+
+//                |
+//                v
+//           +---------+
+//           | Running |
+//           +----+----+
+//                |
+//     +----------+----------+----------+
+//     |          |          |          |
+//     v          v          v          v
+// +---------+ +---------+ +---------+ +---------+
+// | Blocked | | Sleeping| | Waiting | | Exited  |
+// +----+----+ +----+----+ +----+----+ +----+----+
+//      |           |           |               |
+//      |           |           |               |
+//      +-----------+-----------+               v
+//                  |                      +---------+
+//                  |                      | Zombie  |
+//                  +----------------------+---------+
+
+impl Thread {
+    // Existing methods remain the same, but we add/update transitions.
+
+    pub fn set_to_ready(&mut self) {
+        assert!(
+            matches!(self.state, ThreadState::Blocked | ThreadState::Sleeping | ThreadState::Waiting),
+            "Thread can only be set to Ready from Blocked, Sleeping, or Waiting"
+        );
+        self.state = ThreadState::Ready;
+    }
+
+    /// Preemption path: Running -> Ready when a thread is requeued after
+    /// using up its time slice. Distinct from `set_to_ready`, which is only
+    /// for waking a thread that was Blocked/Sleeping/Waiting.
+    pub fn preempt_to_ready(&mut self) {
+        assert!(
+            self.state == ThreadState::Running,
+            "Thread can only be preempted to Ready from Running"
+        );
+        self.state = ThreadState::Ready;
+    }
+
+    pub fn set_to_running(&mut self) {
+        assert!(
+            self.state == ThreadState::Ready,
+            "Thread can only be set to Running from Ready"
+        );
+        self.state = ThreadState::Running;
+    }
+
+    pub fn set_to_blocked(&mut self) {
+        assert!(
+            self.state == ThreadState::Running,
+            "Thread can only be set to Blocked from Running"
+        );
+        self.state = ThreadState::Blocked;
+    }
+
+    pub fn set_to_sleeping(&mut self) {
+        assert!(
+            self.state == ThreadState::Running,
+            "Thread can only be set to Sleeping from Running"
+        );
+        self.state = ThreadState::Sleeping;
+    }
+
+    pub fn set_to_waiting(&mut self) {
+        assert!(
+            self.state == ThreadState::Running,
+            "Thread can only be set to Waiting from Running"
+        );
+        self.state = ThreadState::Waiting;
+    }
+
+    pub fn set_to_exited(&mut self) {
+        assert!(
+            self.state == ThreadState::Running,
+            "Thread can only be set to Exited from Running"
+        );
+        self.state = ThreadState::Exited;
+    }
+
+    pub fn set_to_zombie(&mut self) {
+        assert!(
+            self.state == ThreadState::Exited,
+            "Thread can only be set to Zombie from Exited"
+        );
+        self.state = ThreadState::Zombie;
+    }
+
+    // Optional: a method to reap a zombie (this would typically be called
+    // by the parent process to clean up the thread descriptor).
+    pub fn reap(&mut self) {
+        assert!(
+            self.state == ThreadState::Zombie,
+            "Only Zombie threads can be reaped"
+        );
+        // The Drop impl will free the stack. We could additionally mark
+        // the thread as "reaped" but we can just let it be dropped.
+        // This method is a marker; actual cleanup happens on drop.
+        // If you need to keep the Thread struct alive but mark it as
+        // reaped, you'd need another state, but it's simpler to drop it.
+    }
+}

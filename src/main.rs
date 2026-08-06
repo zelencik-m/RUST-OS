@@ -34,7 +34,7 @@ entry_point!(kernel_main);
 
 
 use rust_os::process::process_manager::{PROCESS_MANAGER, switch_to};
-use rust_os::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now};
+use rust_os::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now, sleep};
 use rust_os::process::PID;
 use rust_os::process::thread::TID;
 
@@ -108,7 +108,7 @@ extern "C" fn thread_a() -> ! {
                 break;
             }
         }
-        // yield_now();
+        sleep(10);
     }
 }
 
@@ -134,7 +134,7 @@ extern "C" fn thread_b() -> ! {
                 break;
             }
         }
-        // yield_now();
+        sleep(10);
     }
 }
 
