@@ -20,6 +20,11 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 use interrupts::{gdt};
+use crate::task::executor::Executor;
+use crate::task::{Task, keyboard};
+use crate::process::process_manager::{PROCESS_MANAGER, switch_to};
+use crate::memory::memory_manager::MemoryManager;
+use bootloader::{BootInfo, entry_point};
 
 #[cfg(test)]
 use bootloader::{entry_point, BootInfo};
@@ -28,11 +33,29 @@ use bootloader::{entry_point, BootInfo};
 entry_point!(test_kernel_main);
 
 
-pub fn init() {
+pub fn init(boot_info: &'static BootInfo) {
     gdt::init();
     interrupts::init_idt();
     unsafe { interrupts::PICS.lock().initialize() };
     x86_64::instructions::interrupts::enable();
+
+
+    let mut mm = unsafe {
+        MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
+    };
+    mm.init_heap().expect("heap initialization failed");
+
+    let mut pm = PROCESS_MANAGER.lock();
+    
+    // 1. Bootstrap the kernel process (PID 0)
+    let kpid = pm.init_kernel_process();
+
+    // 2. Create the main kernel thread that will run the async executor
+    let tid_init = pm.create_thread(kpid, kernel_init_thread);
+
+    let idle_tid = pm.create_idle_thread(crate::process::idle::idle_loop);
+
+
 }
 
 pub trait Testable {
@@ -68,13 +91,7 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 #[cfg(test)]
 fn test_kernel_main(boot_info: &'static BootInfo) -> ! { 
     use memory::memory_manager::MemoryManager;
-    init();
-    
-    let mut mm = unsafe {
-        MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
-    };
-
-    mm.init_heap().expect("heap initialization failed");
+    init(boot_info);
 
     test_main();
     
@@ -125,4 +142,29 @@ fn test_heap_allocation() {
     use alloc::boxed::Box;
     let x = Box::new(42);
     assert_eq!(*x, 42);
+}
+
+// This is the main "background" thread of your kernel
+extern "C" fn kernel_init_thread() -> ! {
+    println!("Kernel init thread started. Running Async Executor...");
+    
+    let mut executor = Executor::new();
+    executor.spawn(Task::new(example_task()));
+    executor.spawn(Task::new(keyboard::print_keypresses()));
+    
+    // This blocks forever, running async tasks.
+    // If you want thread_a and thread_b to still run, you would need to 
+    // integrate the scheduler with the executor (e.g., yielding here).
+    
+    
+    executor.run();
+}
+
+async fn async_number() -> u32 {
+    42
+}
+
+async fn example_task() {
+    let number = async_number().await;
+    println!("async number: {}", number);
 }

@@ -1,3 +1,5 @@
+// src/process/process_manager.rs
+
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -58,6 +60,10 @@ impl ProcessManager {
             self.processes.push(
                 Some(Process::new(pid, parent, name, process_type)),
             );
+            self.processes[parent.0 as usize]
+                .as_mut()
+                .expect("parent process should exist")
+                .add_child(pid);
             pid
         };
         pid
@@ -195,6 +201,31 @@ impl ProcessManager {
             .get_mut(pid.0 as usize)
             .and_then(Option::as_mut)
             .expect("process_mut(): invalid or empty process slot")
+    }
+
+    pub fn create_idle_thread(&mut self, entry: extern "C" fn() -> !) -> TID {
+        let kernel_pid = self.init_kernel_process();
+
+        let tid = if let Some(free_tid) = self.free_tids.pop() {
+            free_tid
+        } else {
+            TID(self.threads.len() as u64)
+        };
+
+        let thread = Box::new(Thread::new(tid, kernel_pid, 4096 * 4, entry));
+
+        if (tid.0 as usize) < self.threads.len() {
+            self.threads[tid.0 as usize] = Some(thread);
+        } else {
+            self.threads.push(Some(thread));
+        }
+
+        self.process_mut(kernel_pid).threads.push(tid);
+
+
+        SCHEDULER.lock().set_idle_thread(tid);
+
+        tid
     }
 
 }

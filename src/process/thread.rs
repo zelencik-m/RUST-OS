@@ -1,7 +1,9 @@
+// src/process/thread.rs
+
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::alloc::Layout;
 use core::arch::global_asm;
-use crate::println;
+use crate::{debug, println};
 
 use crate::process::PID;
 
@@ -67,7 +69,7 @@ impl Thread {
         let raw = unsafe { alloc_zeroed(layout) };
         assert!(!raw.is_null(), "thread stack allocation failed");
 
-        println!("Thread stack allocated at {:p} with size {}", raw, stack_size);
+        debug!("Thread stack allocated at {:p} with size {}", raw, stack_size);
 
         let stack_top = (raw as u64 + stack_size as u64) & !0xF;
         let entry_addr = entry as usize as u64;
@@ -87,7 +89,7 @@ impl Thread {
         //   [stack_top - 40] = r12
         //   [stack_top - 48] = r13
         //   [stack_top - 56] = r14
-        //   [stack_top - 64] = r15          <- rsp starts here
+        //   [stack_top - 64] = r15
         let entry_slot  = stack_top - 8;
         let rflags_slot = stack_top - 16;
 

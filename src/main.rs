@@ -20,14 +20,6 @@ extern crate alloc;
 
 use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
 
-async fn async_number() -> u32 {
-    42
-}
-
-async fn example_task() {
-    let number = async_number().await;
-    println!("async number: {}", number);
-}
 
 
 entry_point!(kernel_main);
@@ -40,45 +32,17 @@ use rust_os::process::thread::TID;
 
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    println!("Hello World{}", "!");
-    rust_os::init();
+    rust_os::init(boot_info);
     
-    debug!("Loading ");
-
-    let mut mm = unsafe {
-        MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
-    };
-    mm.init_heap().expect("heap initialization failed");
-
-    // ________________________________________________
-    // Process & Thread Setup
-    // ________________________________________________
     {
         let mut pm = PROCESS_MANAGER.lock();
-        
-        // 1. Bootstrap the kernel process (PID 0)
-        let kpid = pm.init_kernel_process();
 
-        // 2. Create the main kernel thread that will run the async executor
-        let tid_init = pm.create_thread(kpid, kernel_init_thread);
-
-        // 3. Create a user process with two test threads
         let upid = pm.create_user_process("test".into());
         let tid_a = pm.create_thread(upid, thread_a);
         let tid_b = pm.create_thread(upid, thread_b);
 
-        // Optional: verify TIDs
-        assert_eq!(tid_init, TID(0));
-        assert_eq!(tid_a, TID(1));
-        assert_eq!(tid_b, TID(2));
-    } // lock dropped here
+    } 
 
-    // Hand off execution to the kernel init thread. 
-    // This call will never return to kernel_main.
-    // switch_to(TID(0));
-    // switch_to(TID(0));
-
-    // If switch_to ever returns, halt the CPU.
     rust_os::hlt_loop();
 }
 
@@ -108,7 +72,7 @@ extern "C" fn thread_a() -> ! {
                 break;
             }
         }
-        sleep(10);
+        sleep(50);
     }
 }
 
@@ -134,33 +98,8 @@ extern "C" fn thread_b() -> ! {
                 break;
             }
         }
-        sleep(10);
+        sleep(100);
     }
 }
 
-extern "C" fn kernel_worker() -> ! {
-    let mut ticks: u64 = 0;
-    loop {
-        ticks += 1;
-        // println!("[kernel worker] tick={}", ticks);
-        // Alternate through the user threads.
-        switch_to(TID(1));
-    }
-}
 
-// This is the main "background" thread of your kernel
-extern "C" fn kernel_init_thread() -> ! {
-    println!("Kernel init thread started. Running Async Executor...");
-    
-    let mut executor = Executor::new();
-    executor.spawn(Task::new(example_task()));
-    executor.spawn(Task::new(keyboard::print_keypresses()));
-    
-    // This blocks forever, running async tasks.
-    // If you want thread_a and thread_b to still run, you would need to 
-    // integrate the scheduler with the executor (e.g., yielding here).
-    
-    // switch_to(TID(1)); // Start with thread_a
-    
-    executor.run();
-}

@@ -2,6 +2,7 @@
 
 pub mod process_manager;
 pub mod thread;
+pub mod idle;
 
 use alloc::rc::{Rc, Weak};
 use alloc::string::{String, ToString};
