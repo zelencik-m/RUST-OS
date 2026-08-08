@@ -10,7 +10,7 @@ use spin::Mutex;
 
 use crate::process::thread::{self, TID, Thread, ThreadContext, ThreadState};
 use crate::process::{PID, Process, ProcessType};
-use crate::scheduler::scheduler::Scheduler;  
+use crate::scheduler::scheduler::Scheduler;
 use crate::{println, scheduler};
 
 
@@ -18,7 +18,7 @@ use crate::scheduler::scheduler::SCHEDULER;
 
 pub struct ProcessManager {
     processes: Vec<Option<Process>>,
-    threads: Vec<Option<Box<Thread>>>, 
+    threads: Vec<Option<Box<Thread>>>,
     // runnables: VecDeque<TID>,
 
     free_pids: Vec<PID>,
@@ -60,16 +60,18 @@ impl ProcessManager {
             self.processes.push(
                 Some(Process::new(pid, parent, name, process_type)),
             );
-            self.processes[parent.0 as usize]
-                .as_mut()
-                .expect("parent process should exist")
-                .add_child(pid);
             pid
         };
+
+        self.processes[parent.0 as usize]
+            .as_mut()
+            .expect("parent process should exist")
+            .add_child(pid);
+
         pid
     }
 
-    pub fn create_thread(&mut self, pid: PID, entry_point: extern "C" fn() -> !) -> TID {
+    pub fn _locked(&mut self, pid: PID, entry_point: extern "C" fn() -> !) -> TID {
         let tid = if let Some(free_tid) = self.free_tids.pop() {
             self.threads[free_tid.0 as usize] =
                 Some(Box::new(Thread::new(free_tid, pid, 4096 * 4, entry_point)));
@@ -82,9 +84,7 @@ impl ProcessManager {
             tid
         };
 
-        // Use the new accessor to attach the TID to the process.
         self.process_mut(pid).threads.push(tid);
-        SCHEDULER.lock().add_runnable(tid);
         tid
     }
 
@@ -114,34 +114,26 @@ impl ProcessManager {
     }
 
     pub fn destroy_process(&mut self, pid: PID) {
-        // First destroy all threads belonging to this process.
         let tids: Vec<TID> = self.process(pid).threads.clone();
         for tid in tids {
-            self.remove_thread(tid);
+            remove_thread(tid);
         }
-        // Now clear the process slot and recycle the PID.
         self.processes[pid.0 as usize] = None;
         self.free_pids.push(pid);
     }
 
-    pub fn remove_thread(&mut self, tid: TID) {
-        // Detach from process
+    pub fn remove_thread_locked(&mut self, tid: TID) {
         let pid = self.thread(tid).get_owner();
         self.process_mut(pid).threads.retain(|&x| x != tid);
 
-        // Clear slot and recycle TID; the old Box is dropped here, freeing memory
+        // Clear slot and recycle TID; the old Box is dropped here, freeing
+        // the thread's stack. Callers MUST guarantee this thread is not the
+        // one currently executing — see the free function `remove_thread`.
         self.threads[tid.0 as usize] = None;
         self.free_tids.push(tid);
-
-        SCHEDULER.lock().remove_from_runnables(tid);
     }
 
-    /// Prepares bookkeeping and returns the raw (old, new) context pointers
-    /// needed to perform the actual switch. Must be called while holding
-    /// the lock; the returned pointers remain valid because `threads` is
-    /// stable storage (no reallocation happens between this call and the
-    /// switch, since we're not calling create_thread concurrently).
-    pub fn prepare_switch(&mut self, scheduler: &mut Scheduler, tid: TID)
+    pub fn commit_switch(&mut self, scheduler: &mut Scheduler, tid: TID)
             -> (*mut ThreadContext, *const ThreadContext)
     {
         if Some(tid) == scheduler.current {
@@ -203,7 +195,7 @@ impl ProcessManager {
             .expect("process_mut(): invalid or empty process slot")
     }
 
-    pub fn create_idle_thread(&mut self, entry: extern "C" fn() -> !) -> TID {
+    pub fn create_idle_thread_locked(&mut self, entry: extern "C" fn() -> !) -> TID {
         let kernel_pid = self.init_kernel_process();
 
         let tid = if let Some(free_tid) = self.free_tids.pop() {
@@ -222,12 +214,43 @@ impl ProcessManager {
 
         self.process_mut(kernel_pid).threads.push(tid);
 
-
-        SCHEDULER.lock().set_idle_thread(tid);
-
         tid
     }
 
+}
+
+
+pub fn (pid: PID, entry_point: extern "C" fn() -> !) -> TID {
+    let mut scheduler = SCHEDULER.lock();
+    let mut pm = PROCESS_MANAGER.lock();
+    let tid = pm._locked(pid, entry_point);
+    drop(pm);
+    scheduler.add_runnable(tid);
+    tid
+}
+
+pub fn remove_thread(tid: TID) {
+    let mut scheduler = SCHEDULER.lock();
+    assert!(
+        scheduler.current != Some(tid),
+        "remove_thread: refusing to free the stack of the currently running \
+         thread (TID {:?}) — switch away first, then reap from a different \
+         thread's stack (e.g. the parent, during wait())",
+        tid
+    );
+    scheduler.remove_from_runnables(tid);
+    drop(scheduler);
+
+    PROCESS_MANAGER.lock().remove_thread_locked(tid);
+}
+
+pub fn create_idle_thread(entry: extern "C" fn() -> !) -> TID {
+    let mut scheduler = SCHEDULER.lock();
+    let mut pm = PROCESS_MANAGER.lock();
+    let tid = pm.create_idle_thread_locked(entry);
+    drop(pm);
+    scheduler.set_idle_thread(tid);
+    tid
 }
 
 /// Switch execution to `tid`. This is a free function (not a method taking
@@ -235,10 +258,13 @@ impl ProcessManager {
 /// actual context switch happens — the switch doesn't return until some
 /// other thread switches back, so holding the lock across it would
 /// deadlock anyone else who needs to touch the process manager meanwhile.
+///
+/// Locks are taken `Scheduler -> ProcessManager`, matching every other
+/// free function in this module (fix 2).
 pub fn switch_to(tid: TID) {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
-    let (old_ctx, new_ctx) = pm.prepare_switch(&mut *scheduler, tid);
+    let (old_ctx, new_ctx) = pm.commit_switch(&mut *scheduler, tid);
     drop(scheduler);
     drop(pm);
     unsafe {
@@ -248,12 +274,6 @@ pub fn switch_to(tid: TID) {
 
 
 impl ProcessManager {
-
-    pub fn run_thread(&mut self, tid: TID) {
-        let thread = self.thread_mut(tid);
-        thread.set_to_running(); // asserts state == Ready
-    }
-
     /// Transition a thread from Running → Blocked and remove it from the run queue.
     pub fn block_thread(&mut self, tid: TID) {
         let thread = self.thread_mut(tid);

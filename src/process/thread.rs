@@ -90,6 +90,17 @@ impl Thread {
         //   [stack_top - 48] = r13
         //   [stack_top - 56] = r14
         //   [stack_top - 64] = r15
+        //
+        // NOTE on the preemption model (fix 1): a brand-new thread's fake
+        // frame deliberately has NO interrupt frame underneath it and skips
+        // straight to `entry_addr` via `ret`. That's correct as long as the
+        // timer-interrupt entry stub calls `schedule()` as an ordinary
+        // (non-tail) function call, on the interrupted thread's own kernel
+        // stack, through a plain interrupt gate with no IST — see the
+        // `switch_context` doc comment below for the full contract. A new
+        // thread never needs to `iretq` out of an interrupt it was never in,
+        // so it can start directly at `entry_addr` with only the
+        // callee-saved registers `switch_context` expects to pop.
         let entry_slot  = stack_top - 8;
         let rflags_slot = stack_top - 16;
 
@@ -145,6 +156,7 @@ impl Drop for Thread {
         unsafe { dealloc(self.stack_ptr, self.stack_layout) };
     }
 }
+
 
 global_asm!(
     ".global switch_context",
@@ -205,9 +217,6 @@ impl Thread {
         self.state = ThreadState::Ready;
     }
 
-    /// Preemption path: Running -> Ready when a thread is requeued after
-    /// using up its time slice. Distinct from `set_to_ready`, which is only
-    /// for waking a thread that was Blocked/Sleeping/Waiting.
     pub fn preempt_to_ready(&mut self) {
         assert!(
             self.state == ThreadState::Running,
@@ -264,17 +273,10 @@ impl Thread {
         self.state = ThreadState::Zombie;
     }
 
-    // Optional: a method to reap a zombie (this would typically be called
-    // by the parent process to clean up the thread descriptor).
     pub fn reap(&mut self) {
         assert!(
             self.state == ThreadState::Zombie,
             "Only Zombie threads can be reaped"
         );
-        // The Drop impl will free the stack. We could additionally mark
-        // the thread as "reaped" but we can just let it be dropped.
-        // This method is a marker; actual cleanup happens on drop.
-        // If you need to keep the Thread struct alive but mark it as
-        // reaped, you'd need another state, but it's simpler to drop it.
     }
 }

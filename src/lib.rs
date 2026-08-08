@@ -22,9 +22,10 @@ use core::panic::PanicInfo;
 use interrupts::{gdt};
 use crate::task::executor::Executor;
 use crate::task::{Task, keyboard};
-use crate::process::process_manager::{PROCESS_MANAGER, switch_to};
+use crate::process::process_manager::PROCESS_MANAGER;
 use crate::memory::memory_manager::MemoryManager;
 use bootloader::{BootInfo, entry_point};
+use crate::process::process_manager;
 
 #[cfg(test)]
 use bootloader::{entry_point, BootInfo};
@@ -50,10 +51,12 @@ pub fn init(boot_info: &'static BootInfo) {
     // 1. Bootstrap the kernel process (PID 0)
     let kpid = pm.init_kernel_process();
 
-    // 2. Create the main kernel thread that will run the async executor
-    let tid_init = pm.create_thread(kpid, kernel_init_thread);
+    drop(pm);
 
-    let idle_tid = pm.create_idle_thread(crate::process::idle::idle_loop);
+    // 2. Create the main kernel thread that will run the async executor
+    let tid_init = process_manager::create_thread(kpid, kernel_init_thread);
+
+    let idle_tid = process_manager::create_idle_thread(crate::process::idle::idle_loop);
 
 
 }

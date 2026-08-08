@@ -8,40 +8,28 @@
 
 use core::panic::PanicInfo;
 use rust_os::{hlt_loop, print, println};
-use rust_os::task::{Task, keyboard};
-use rust_os::task::executor::Executor;
-use rust_os::memory::memory_manager::MemoryManager;
-use rust_os::debug;
 
 use bootloader::{BootInfo, entry_point};
-use alloc::string::{String, ToString};
 
 extern crate alloc;
-
-use alloc::{boxed::Box, vec, vec::Vec, rc::Rc};
-
-
 
 entry_point!(kernel_main);
 
 
-use rust_os::process::process_manager::{PROCESS_MANAGER, switch_to};
-use rust_os::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now, sleep};
-use rust_os::process::PID;
-use rust_os::process::thread::TID;
-
+use rust_os::process::process_manager::PROCESS_MANAGER;
+use rust_os::scheduler::scheduler::sleep;
+use rust_os::process::process_manager;
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rust_os::init(boot_info);
     
-    {
-        let mut pm = PROCESS_MANAGER.lock();
+    // main.rs — kernel_main()
+    let mut pm = PROCESS_MANAGER.lock();
+    let upid = pm.create_user_process("test".into());
+    drop(pm); // release before calling the free functions below
 
-        let upid = pm.create_user_process("test".into());
-        let tid_a = pm.create_thread(upid, thread_a);
-        let tid_b = pm.create_thread(upid, thread_b);
-
-    } 
+    let tid_a = process_manager::create_thread(upid, thread_a);
+    let tid_b = process_manager::create_thread(upid, thread_b);
 
     rust_os::hlt_loop();
 }
@@ -98,7 +86,7 @@ extern "C" fn thread_b() -> ! {
                 break;
             }
         }
-        sleep(100);
+        // sleep(100);
     }
 }
 
