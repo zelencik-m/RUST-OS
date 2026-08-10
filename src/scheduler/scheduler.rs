@@ -74,10 +74,9 @@ impl Scheduler {
             let pm = PROCESS_MANAGER.lock();
             let state = pm.get_thread_state(cur);
             drop(pm);
-            if matches!(state, ThreadState::Running | ThreadState::Ready) {
+            if Some(cur) != self.idle_thread && matches!(state, ThreadState::Running | ThreadState::Ready) {
                 self.runnables.push_back(cur);
             }
-
         }
 
         let mut remaining = self.sleep_queue.len();

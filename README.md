@@ -1,30 +1,59 @@
 # rust-os
 
-# Process & Thread Management
-
-This module provides a cooperative multitasking kernel with processes and threads.
+A modular kernel with processes, threads, and a FIFO scheduler supporting time-slice preemption and sleep queues.
 
 ## Overview
-- **Processes** (`Process`) group threads and hold metadata (PID, parent, name, type).
-- **Threads** (`Thread`) are the schedulable units; each has its own stack and execution context.
-- Scheduling is FIFO‑based; threads must explicitly yield (or be switched via timer IRQ).
 
-## Key Data Structures
-- `ProcessManager`: global singleton protected by `spin::Mutex`. Manages:
-  - `processes` / `threads`: slots with `Option` for reuse.
-  - `free_pids` / `free_tids`: recycled IDs.
-  - `runnables`: queue of ready `TID`s.
-  - `current`: currently running thread.
-  - `kernel_context`: placeholder for idle switching.
+- **Process** – holds PID, name, parent/children, and owned thread IDs.
+- **Thread** – owns a stack, CPU context, state, and a reference to its process.
+- **Scheduler** – global run-queue, sleep queue, idle thread, and time slice (2 ticks).
 
-## Lifecycle
-- `create_process` / `create_kernel_process` / `create_user_process` allocate a `Process`.
-- `create_thread` allocates a stack, initialises context, adds to process, and enqueues.
-- `remove_thread` detaches and recycles TID; `destroy_process` removes all threads and recycles PID.
+## Process & Thread Management
+
+- PID(0) = kernel process (auto‑created).
+- Slots in vectors are recycled (`free_pids`, `free_tids`).
+- Threads are created with a stack (multiple of 16 B) and an entry point.
+- Fake stack frame: `ret` goes directly to entry point; interrupts enabled.
+
+## Scheduler
+
+### Key Fields
+| Field         | Description                                |
+|---------------|--------------------------------------------|
+| `current`     | Currently running thread (or `None`).      |
+| `runnables`   | `VecDeque<TID>` – ready threads (FIFO).    |
+| `tick_count`  | Monotonically increasing tick counter.     |
+| `sleep_queue` | Threads waiting for a wake‑up tick.        |
+| `idle_thread` | Runs when `runnables` is empty.            |
+
+### Behaviour
+- **`tick()`** increments `tick_count`; returns `true` every `TIME_SLICE` ticks (2).
+- **`schedule()`**: current thread re‑enqueued if still runnable; sleeping threads woken if time reached; idle thread selected if queue empty.
+- **`sleep(ticks)`**: current thread pushed to sleep queue, set to `Sleeping`, then yields.
+- **`yield_now()`** immediately calls `schedule()`.
+- Preemption relies on timer IRQ calling `schedule()` on the interrupted thread’s kernel stack (no IST).
 
 ## Context Switching
-- `switch_to(tid)` prepares old/new context pointers while holding the lock, then releases it before the assembly switch.
-- Assembly saves/restores callee‑saved registers (`rbp`, `rbx`, `r12`‑`r15`) and `rsp`; only `rsp` is stored in `ThreadContext`.
 
-## Thread States
-`Ready`, `Running`, `Sleeping`, `Blocked`, `Waiting`, `Zombie`, `Exited`.
+`switch_context` (assembly) saves/restores callee‑saved regs + `rflags`; only `rsp` is stored in `ThreadContext`. Locks are dropped **before** the switch to avoid deadlocks.
+
+## Thread State Machine
+
+`Ready` → `Running` → `Blocked` | `Sleeping` | `Waiting` | `Exited` → `Zombie`.
+
+All transitions are guarded with assertions.
+
+## Locking Order
+
+Always: `SCHEDULER` → `PROCESS_MANAGER`.
+
+## Key Global Functions
+
+| Function                | Purpose                                    |
+|-------------------------|--------------------------------------------|
+| `create_thread(pid,fn)` | Allocates thread, adds to run queue.       |
+| `remove_thread(tid)`    | Destroys thread (must not be current).     |
+| `create_idle_thread(fn)`| Sets up idle thread, registers in scheduler.|
+| `schedule()`            | Pick next thread & switch.                 |
+| `yield_now()`           | Voluntary yield.                           |
+| `sleep(ticks)`          | Sleep for given ticks.                     |

@@ -71,7 +71,7 @@ impl ProcessManager {
         pid
     }
 
-    pub fn _locked(&mut self, pid: PID, entry_point: extern "C" fn() -> !) -> TID {
+    pub fn create_thread_locked(&mut self, pid: PID, entry_point: extern "C" fn() -> !) -> TID {
         let tid = if let Some(free_tid) = self.free_tids.pop() {
             self.threads[free_tid.0 as usize] =
                 Some(Box::new(Thread::new(free_tid, pid, 4096 * 4, entry_point)));
@@ -220,10 +220,10 @@ impl ProcessManager {
 }
 
 
-pub fn (pid: PID, entry_point: extern "C" fn() -> !) -> TID {
+pub fn create_thread(pid: PID, entry_point: extern "C" fn() -> !) -> TID {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
-    let tid = pm._locked(pid, entry_point);
+    let tid = pm.create_thread_locked(pid, entry_point);
     drop(pm);
     scheduler.add_runnable(tid);
     tid

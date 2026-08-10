@@ -212,7 +212,8 @@ impl Thread {
     pub fn set_to_ready(&mut self) {
         assert!(
             matches!(self.state, ThreadState::Blocked | ThreadState::Sleeping | ThreadState::Waiting),
-            "Thread can only be set to Ready from Blocked, Sleeping, or Waiting"
+            "Thread can only be set to Ready from Blocked, Sleeping, or Waiting, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Ready;
     }
@@ -220,7 +221,8 @@ impl Thread {
     pub fn preempt_to_ready(&mut self) {
         assert!(
             self.state == ThreadState::Running,
-            "Thread can only be preempted to Ready from Running"
+            "Thread can only be preempted to Ready from Running, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Ready;
     }
@@ -228,7 +230,8 @@ impl Thread {
     pub fn set_to_running(&mut self) {
         assert!(
             self.state == ThreadState::Ready,
-            "Thread can only be set to Running from Ready"
+            "Thread can only be set to Running from Ready, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Running;
     }
@@ -236,7 +239,8 @@ impl Thread {
     pub fn set_to_blocked(&mut self) {
         assert!(
             self.state == ThreadState::Running,
-            "Thread can only be set to Blocked from Running"
+            "Thread can only be set to Blocked from Running, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Blocked;
     }
@@ -244,7 +248,8 @@ impl Thread {
     pub fn set_to_sleeping(&mut self) {
         assert!(
             self.state == ThreadState::Running,
-            "Thread can only be set to Sleeping from Running"
+            "Thread can only be set to Sleeping from Running, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Sleeping;
     }
@@ -252,7 +257,8 @@ impl Thread {
     pub fn set_to_waiting(&mut self) {
         assert!(
             self.state == ThreadState::Running,
-            "Thread can only be set to Waiting from Running"
+            "Thread can only be set to Waiting from Running, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Waiting;
     }
@@ -260,7 +266,8 @@ impl Thread {
     pub fn set_to_exited(&mut self) {
         assert!(
             self.state == ThreadState::Running,
-            "Thread can only be set to Exited from Running"
+            "Thread can only be set to Exited from Running, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Exited;
     }
@@ -268,7 +275,8 @@ impl Thread {
     pub fn set_to_zombie(&mut self) {
         assert!(
             self.state == ThreadState::Exited,
-            "Thread can only be set to Zombie from Exited"
+            "Thread can only be set to Zombie from Exited, current state: {:?}",
+            self.state
         );
         self.state = ThreadState::Zombie;
     }
@@ -276,7 +284,8 @@ impl Thread {
     pub fn reap(&mut self) {
         assert!(
             self.state == ThreadState::Zombie,
-            "Only Zombie threads can be reaped"
+            "Only Zombie threads can be reaped, current state: {:?}",
+            self.state
         );
     }
 }
