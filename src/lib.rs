@@ -26,6 +26,11 @@ use crate::process::process_manager::PROCESS_MANAGER;
 use crate::memory::memory_manager::MemoryManager;
 use bootloader::{BootInfo, entry_point};
 use crate::process::process_manager;
+use crate::memory::frame_allocator::{self, FRAME_ALLOCATOR, BootInfoFrameAllocator};
+
+
+use x86_64::structures::paging::FrameAllocator;
+
 
 #[cfg(test)]
 use bootloader::{entry_point, BootInfo};
@@ -45,6 +50,8 @@ pub fn init(boot_info: &'static BootInfo) {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
     mm.init_heap().expect("heap initialization failed");
+
+    unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
 
     let mut pm = PROCESS_MANAGER.lock();
     

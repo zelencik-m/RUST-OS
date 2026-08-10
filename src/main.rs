@@ -60,7 +60,7 @@ extern "C" fn thread_a() -> ! {
                 break;
             }
         }
-        sleep(50);
+        sleep(10);
     }
 }
 
