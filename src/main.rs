@@ -23,13 +23,47 @@ use rust_os::process::process_manager;
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rust_os::init(boot_info);
     
+use rust_os::memory::address_space::{AddressSpace, mapper_for_address_space};
+use x86_64::{VirtAddr, structures::paging::OffsetPageTable};
+use x86_64::structures::paging::Translate;
+use rust_os::memory::paging;
+use rust_os::memory::memory_manager;
+
+    // ---------- checkpoint: verify kernel-half sharing ----------
+    unsafe {
+        let phys_offset = VirtAddr::new(boot_info.physical_memory_offset);
+
+        // Lock the global memory manager
+        let mut guard = memory_manager::MEMORY_MANAGER.lock();
+        let mm = guard.as_mut().expect("Memory manager not initialised");
+
+        // Create a test address space (uses mm's frame allocator)
+        let new_space = mm.create_address_space();
+
+        // Build a mapper for the new space
+        let new_mapper = mapper_for_address_space(new_space.p4_frame, phys_offset);
+
+        // Build a mapper for the currently active (live) space
+        let live_p4 = paging::active_level_4_table(phys_offset);
+        let live_mapper = OffsetPageTable::new(live_p4, phys_offset);
+
+        // Pick a kernel virtual address and translate
+        let test_virt = VirtAddr::new(0xFFFF_FFFF_8000_0000);
+
+        let phys_new = new_mapper.translate_addr(test_virt);
+        let phys_live = live_mapper.translate_addr(test_virt);
+
+        assert_eq!(phys_new, phys_live, "Kernel-half sharing failed!");
+        println!("[OK] Kernel-half sharing verified. phys_new == phys_live = {:?}", phys_new);
+    }
+
     // main.rs — kernel_main()
     let mut pm = PROCESS_MANAGER.lock();
     let upid = pm.create_user_process("test".into());
     drop(pm); // release before calling the free functions below
 
-    let tid_a = process_manager::create_thread(upid, thread_a);
-    let tid_b = process_manager::create_thread(upid, thread_b);
+    // let tid_a = process_manager::create_thread(upid, thread_a);
+    // let tid_b = process_manager::create_thread(upid, thread_b);
 
     rust_os::hlt_loop();
 }

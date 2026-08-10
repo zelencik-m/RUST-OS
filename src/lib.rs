@@ -23,7 +23,7 @@ use interrupts::{gdt};
 use crate::task::executor::Executor;
 use crate::task::{Task, keyboard};
 use crate::process::process_manager::PROCESS_MANAGER;
-use crate::memory::memory_manager::MemoryManager;
+use crate::memory::memory_manager::{MemoryManager, MEMORY_MANAGER};
 use bootloader::{BootInfo, entry_point};
 use crate::process::process_manager;
 use crate::memory::frame_allocator::{self, FRAME_ALLOCATOR, BootInfoFrameAllocator};
@@ -45,12 +45,12 @@ pub fn init(boot_info: &'static BootInfo) {
     unsafe { interrupts::PICS.lock().initialize() };
     x86_64::instructions::interrupts::enable();
 
-
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
     mm.init_heap().expect("heap initialization failed");
 
+    *MEMORY_MANAGER.lock() = Some(mm);
     unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
 
     let mut pm = PROCESS_MANAGER.lock();
@@ -178,3 +178,4 @@ async fn example_task() {
     let number = async_number().await;
     println!("async number: {}", number);
 }
+
