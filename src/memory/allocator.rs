@@ -1,4 +1,4 @@
-// src/memoryallopcator.rs
+// src/memory/allocator.rs
 
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
@@ -19,7 +19,7 @@ pub const HEAP_SIZE: usize = 100 * 1024;
 
 #[global_allocator]
 // static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());
-static ALLOCATOR: Locked<BuddyAllocator> = Locked::new(BuddyAllocator::new());
+pub static ALLOCATOR: Locked<BuddyAllocator> = Locked::new(BuddyAllocator::new());
 
 
 pub struct Dummy;
