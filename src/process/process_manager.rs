@@ -12,9 +12,17 @@ use crate::process::thread::{self, TID, Thread, ThreadContext, ThreadState};
 use crate::process::{PID, Process, ProcessType};
 use crate::scheduler::scheduler::Scheduler;
 use crate::{println, scheduler};
-
-
+use crate::memory::address_space::{AddressSpace, map_user_region};
+use crate::memory::vma::{VmArea, VmaKind};
+use crate::memory::memory_manager::MEMORY_MANAGER;
 use crate::scheduler::scheduler::SCHEDULER;
+use x86_64::structures::paging::{PageTableFlags, Size4KiB};
+use x86_64::VirtAddr;
+
+use x86_64::structures::paging::PhysFrame;
+use x86_64::structures::paging::FrameAllocator;
+use x86_64::structures::paging::Mapper;
+
 
 pub struct ProcessManager {
     processes: Vec<Option<Process>>,
@@ -217,6 +225,51 @@ impl ProcessManager {
         tid
     }
 
+    pub fn create_user_process_with_space(
+        &mut self,
+        parent: PID,
+        name: String,
+        address_space: AddressSpace,
+    ) -> PID {
+        let pid = if let Some(free_pid) = self.free_pids.pop() {
+            self.processes[free_pid.0 as usize] =
+                Some(Process::new_user(free_pid, parent, name, address_space));
+            free_pid
+        } else {
+            let pid = PID(self.processes.len() as u64);
+            self.processes.push(
+                Some(Process::new_user(pid, parent, name, address_space)),
+            );
+            pid
+        };
+        self.processes[parent.0 as usize]
+            .as_mut().expect("parent exists")
+            .add_child(pid);
+        pid
+    }
+
+    /// Map a user region into a process and record the VMA.
+    pub fn map_user_region_for(
+        &mut self,
+        pid: PID,
+        fa: &mut impl FrameAllocator<Size4KiB>,
+        off: VirtAddr,
+        start: VirtAddr,
+        size: usize,
+        leaf_flags: PageTableFlags,
+        kind: VmaKind,
+    ) -> Vec<PhysFrame<Size4KiB>> {
+        let process = self.process_mut(pid);
+        let space = process.address_space.as_mut()
+            .expect("map_user_region_for: kernel process has no address space");
+
+        let frames = map_user_region(space, fa, off, start, size, leaf_flags);
+
+        // Borrow of `space` ends here; now safe to mutate `process.vmas`.
+        process.vmas.push(VmArea { start, size: size as u64, flags: leaf_flags, kind });
+        frames
+    }
+
 }
 
 
@@ -329,4 +382,28 @@ impl ProcessManager {
         let thread = self.thread_mut(tid);
         thread.preempt_to_ready(); // asserts state == Running
     }
+}
+
+pub fn create_user_process(name: String) -> PID {
+    // 1. Build the address space while holding only MEMORY_MANAGER
+    let space = {
+        let mut mm = MEMORY_MANAGER.lock();
+        let mm = mm.as_mut().expect("MemoryManager not initialized");
+        AddressSpace::new(&mut mm.frame_allocator, mm.physical_memory_offset)
+    };
+    // 2. Register the process while holding only PROCESS_MANAGER
+    PROCESS_MANAGER.lock().create_user_process_with_space(PID(0), name, space)
+}
+
+/// Free function wrapper to map memory safely
+pub fn map_user_region_for_process(
+    pid: PID, start: VirtAddr, size: usize,
+    leaf_flags: PageTableFlags, kind: VmaKind,
+) -> Vec<PhysFrame<Size4KiB>> {
+    // Lock order: MM first, then PM
+    let mut mm = MEMORY_MANAGER.lock();
+    let mm = mm.as_mut().expect("MemoryManager not initialized");
+    let off = mm.physical_memory_offset;
+    PROCESS_MANAGER.lock()
+        .map_user_region_for(pid, &mut mm.frame_allocator, off, start, size, leaf_flags, kind)
 }

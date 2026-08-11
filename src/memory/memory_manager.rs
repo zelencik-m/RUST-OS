@@ -11,7 +11,7 @@ use crate::memory::address_space::AddressSpace;
 pub struct MemoryManager {
     pub mapper: OffsetPageTable<'static>,
     pub frame_allocator: BootInfoFrameAllocator,
-    physical_memory_offset: VirtAddr,
+    pub physical_memory_offset: VirtAddr,
 }
 
 pub static MEMORY_MANAGER: Mutex<Option<MemoryManager>> = Mutex::new(None);

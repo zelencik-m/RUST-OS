@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use crate::process::thread::{TID, ThreadState};
+use crate::memory::{VmArea, AddressSpace};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PID(pub u64);
@@ -43,8 +44,9 @@ struct ProcessContext{
 
 pub struct Process {
     identity: ProcessIdentity,
-
     pub threads: Vec<TID>,
+    pub address_space: Option<AddressSpace>,
+    pub vmas: Vec<VmArea>,
 }
 
 impl Process {
@@ -57,7 +59,9 @@ impl Process {
                     name: name, 
                     children: Vec::new(),
                 }, 
-                threads: Vec::new(),
+            threads: Vec::new(),
+            address_space: None,
+            vmas: Vec::new(),
             }
     }
 
@@ -67,6 +71,12 @@ impl Process {
 
     pub fn get_children(&self) -> &Vec<PID> {
         &self.identity.children
+    }
+
+    pub fn new_user(pid: PID, parent: PID, name: String, space: AddressSpace) -> Self {
+        let mut p = Self::new(pid, parent, name, ProcessType::User);
+        p.address_space = Some(space);
+        p
     }
     
 }
