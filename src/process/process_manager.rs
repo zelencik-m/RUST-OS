@@ -11,7 +11,7 @@ use spin::Mutex;
 use crate::process::thread::{self, TID, Thread, ThreadContext, ThreadState};
 use crate::process::{PID, Process, ProcessType};
 use crate::scheduler::scheduler::Scheduler;
-use crate::{println, scheduler};
+use crate::{println, scheduler, debugln};
 use crate::memory::address_space::{AddressSpace, map_user_region};
 use crate::memory::vma::{VmArea, VmaKind};
 use crate::memory::memory_manager::MEMORY_MANAGER;
@@ -22,7 +22,8 @@ use x86_64::VirtAddr;
 use x86_64::structures::paging::PhysFrame;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
-
+use x86_64::registers::control::Cr3;
+use x86_64::instructions::interrupts;
 
 pub struct ProcessManager {
     processes: Vec<Option<Process>>,
@@ -124,7 +125,7 @@ impl ProcessManager {
     pub fn destroy_process(&mut self, pid: PID) {
         let tids: Vec<TID> = self.process(pid).threads.clone();
         for tid in tids {
-            remove_thread(tid);
+            self.remove_thread_locked(tid);
         }
         self.processes[pid.0 as usize] = None;
         self.free_pids.push(pid);
@@ -144,11 +145,11 @@ impl ProcessManager {
     pub fn commit_switch(&mut self, scheduler: &mut Scheduler, tid: TID)
             -> (*mut ThreadContext, *const ThreadContext)
     {
-        if Some(tid) == scheduler.current {
-            let t = self.thread(tid);
-            let ctx = t.context_ptr() as *mut ThreadContext;
-            return (ctx, ctx);
-        }
+        // if Some(tid) == scheduler.current {
+        //     let t = self.thread(tid);
+        //     let ctx = t.context_ptr() as *mut ThreadContext;
+        //     return (ctx, ctx);
+        // }
 
         let new_ctx: *const ThreadContext = {
             let t = self.thread_mut(tid);
@@ -274,12 +275,14 @@ impl ProcessManager {
 
 
 pub fn create_thread(pid: PID, entry_point: extern "C" fn() -> !) -> TID {
-    let mut scheduler = SCHEDULER.lock();
-    let mut pm = PROCESS_MANAGER.lock();
-    let tid = pm.create_thread_locked(pid, entry_point);
-    drop(pm);
-    scheduler.add_runnable(tid);
-    tid
+    interrupts::without_interrupts(|| {
+        let mut scheduler = SCHEDULER.lock();
+        let mut pm = PROCESS_MANAGER.lock();
+        let tid = pm.create_thread_locked(pid, entry_point);
+        drop(pm);
+        scheduler.add_runnable(tid);
+        tid
+    })
 }
 
 pub fn remove_thread(tid: TID) {
@@ -298,12 +301,14 @@ pub fn remove_thread(tid: TID) {
 }
 
 pub fn create_idle_thread(entry: extern "C" fn() -> !) -> TID {
-    let mut scheduler = SCHEDULER.lock();
-    let mut pm = PROCESS_MANAGER.lock();
-    let tid = pm.create_idle_thread_locked(entry);
-    drop(pm);
-    scheduler.set_idle_thread(tid);
-    tid
+    interrupts::without_interrupts(|| {
+        let mut scheduler = SCHEDULER.lock();
+        let mut pm = PROCESS_MANAGER.lock();
+        let tid = pm.create_idle_thread_locked(entry);
+        drop(pm);
+        scheduler.set_idle_thread(tid);
+        tid
+    })
 }
 
 /// Switch execution to `tid`. This is a free function (not a method taking
@@ -315,16 +320,48 @@ pub fn create_idle_thread(entry: extern "C" fn() -> !) -> TID {
 /// Locks are taken `Scheduler -> ProcessManager`, matching every other
 /// free function in this module (fix 2).
 pub fn switch_to(tid: TID) {
-    let mut scheduler = SCHEDULER.lock();
-    let mut pm = PROCESS_MANAGER.lock();
-    let (old_ctx, new_ctx) = pm.commit_switch(&mut *scheduler, tid);
-    drop(scheduler);
-    drop(pm);
-    unsafe {
-        thread::switch_context(old_ctx, new_ctx);
-    }
+     interrupts::without_interrupts(|| {
+        let mut scheduler = SCHEDULER.lock();
+        let mut pm = PROCESS_MANAGER.lock();
+
+        let new_owner = pm.thread(tid).get_owner();
+
+        debugln!("Thread: {:?}, Process:{:?}",tid, new_owner );
+
+        // Check if we are switching to a thread of a different process.
+        let changing = scheduler
+            .current
+            .map(|c| pm.thread(c).get_owner() != new_owner)
+            .unwrap_or(true); // first ever switch → treat as change
+
+        if changing {
+            debugln!("Changing");
+            if let Some(space) = &pm.process(new_owner).address_space {
+                let (_, flags) = Cr3::read();
+                unsafe { Cr3::write(space.cr3(), flags); }
+                debugln!("[CR3 switch] to PID {}", new_owner.0);
+            }
+        }
+
+        let (old_ctx, new_ctx) = pm.commit_switch(&mut *scheduler, tid);
+        drop(scheduler);
+        drop(pm);
+
+        unsafe { thread::switch_context(old_ctx, new_ctx); }
+    })
 }
 
+pub fn destroy_process(pid: PID) {
+    let tids: Vec<TID> = {
+        let pm = PROCESS_MANAGER.lock();
+        pm.process(pid).threads.clone()
+    };
+    {
+        let mut sched = SCHEDULER.lock();
+        for t in &tids { sched.remove_from_runnables(*t); }
+    }
+    PROCESS_MANAGER.lock().destroy_process(pid);
+}
 
 impl ProcessManager {
     /// Transition a thread from Running → Blocked and remove it from the run queue.
@@ -385,14 +422,14 @@ impl ProcessManager {
 }
 
 pub fn create_user_process(name: String) -> PID {
-    // 1. Build the address space while holding only MEMORY_MANAGER
-    let space = {
-        let mut mm = MEMORY_MANAGER.lock();
-        let mm = mm.as_mut().expect("MemoryManager not initialized");
-        AddressSpace::new(&mut mm.frame_allocator, mm.physical_memory_offset)
-    };
-    // 2. Register the process while holding only PROCESS_MANAGER
-    PROCESS_MANAGER.lock().create_user_process_with_space(PID(0), name, space)
+    interrupts::without_interrupts(|| {
+        let space = {
+            let mut mm = MEMORY_MANAGER.lock();
+            let mm = mm.as_mut().expect("MemoryManager not initialized");
+            AddressSpace::new(&mut mm.frame_allocator, mm.physical_memory_offset)
+        };
+        PROCESS_MANAGER.lock().create_user_process_with_space(PID(0), name, space)
+    })
 }
 
 /// Free function wrapper to map memory safely

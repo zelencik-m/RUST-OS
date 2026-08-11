@@ -43,15 +43,14 @@ pub fn init(boot_info: &'static BootInfo) {
     gdt::init();
     interrupts::init_idt();
     unsafe { interrupts::PICS.lock().initialize() };
-    x86_64::instructions::interrupts::enable();
-
+    debugln!("{:?}", boot_info.physical_memory_offset);
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
     mm.init_heap().expect("heap initialization failed");
 
     *MEMORY_MANAGER.lock() = Some(mm);
-    unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
+    // unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
 
     let mut pm = PROCESS_MANAGER.lock();
     
@@ -64,6 +63,7 @@ pub fn init(boot_info: &'static BootInfo) {
     let tid_init = process_manager::create_thread(kpid, kernel_init_thread);
 
     let idle_tid = process_manager::create_idle_thread(crate::process::idle::idle_loop);
+    x86_64::instructions::interrupts::enable();
 
 
 }

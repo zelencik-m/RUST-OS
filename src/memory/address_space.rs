@@ -14,11 +14,20 @@ impl AddressSpace {
     pub fn new(fa: &mut impl FrameAllocator<Size4KiB>, off: VirtAddr) -> Self {
         let p4_frame = fa.allocate_frame().unwrap();
         let p4: &mut PageTable = unsafe { &mut *(off + p4_frame.start_address().as_u64()).as_mut_ptr() };
-        p4.zero();
         let kernel_p4 = unsafe { active_level_4_table(off) };
-        for i in 256..512 { p4[i] = kernel_p4[i].clone(); }
+
+        // Copy EVERYTHING from the kernel's table: identity-mapped low
+        // memory (VGA buffer etc. at index 0), the physical-memory offset
+        // window, and the higher-half kernel range. This gives the new
+        // space full parity with the kernel until you actually start
+        // removing/replacing entries for real user isolation.
+        for i in 0..512 {
+            p4[i] = kernel_p4[i].clone();
+        }
+
         AddressSpace { p4_frame }
     }
+
 
     /// Build a mapper for an address space that may or may not be active.
     /// Tied to &mut self to prevent multiple simultaneous mutable borrows.
@@ -26,6 +35,10 @@ impl AddressSpace {
         let p4_ptr = (off + self.p4_frame.start_address().as_u64()).as_mut_ptr();
         let p4: &mut PageTable = &mut *p4_ptr;
         unsafe { OffsetPageTable::new(p4, off) }
+    }
+
+    pub fn cr3(&self) -> PhysFrame<Size4KiB> {
+        self.p4_frame
     }
 }
 
