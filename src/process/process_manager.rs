@@ -25,6 +25,7 @@ use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
 use x86_64::registers::control::Cr3;
 use x86_64::instructions::interrupts;
+use x86_64::structures::paging::Page;
 
 pub struct ProcessManager {
     processes: Vec<Option<Process>>,
@@ -272,6 +273,74 @@ impl ProcessManager {
         frames
     }
 
+    pub fn register_vma_only(
+        &mut self,
+        pid: PID,
+        start: VirtAddr,
+        size: usize,
+        flags: PageTableFlags,
+        kind: VmaKind,
+    ) {
+        let process = self.process_mut(pid);
+        process.vmas.push(VmArea {
+            start,
+            size: size as u64,
+            flags,
+            kind,
+        });
+    }
+
+    pub fn get_vma_flags(&self, pid: PID, addr: VirtAddr) -> Option<PageTableFlags> {
+        let proc = self.process(pid);
+        proc.vmas.iter().find(|v| {
+            let start = v.start.as_u64();
+            let end   = start + v.size;
+            let a     = addr.as_u64();
+            a >= start && a < end
+        }).map(|v| v.flags)
+    }
+
+    /// Maps a single frame for a faulting process (Demand Paging).
+    pub fn demand_map_page(
+        &mut self,
+        pid: PID,
+        page_addr: VirtAddr,
+        leaf_flags: PageTableFlags,
+        fa: &mut impl FrameAllocator<Size4KiB>,
+        off: VirtAddr,
+    ) {
+        let proc = self.process_mut(pid);
+        let space = proc.address_space.as_mut()
+            .expect("demand_map: kernel process has no user space");
+
+        let frame = fa.allocate_frame().expect("demand_map: out of frames");
+
+        let parent_flags = PageTableFlags::PRESENT
+                         | PageTableFlags::WRITABLE
+                         | PageTableFlags::USER_ACCESSIBLE;
+
+        let page = Page::<Size4KiB>::containing_address(page_addr);
+        let mut mapper = unsafe { space.mapper(off) };
+
+        unsafe {
+            mapper
+                .map_to_with_table_flags(
+                    page, frame,
+                    leaf_flags | PageTableFlags::USER_ACCESSIBLE,
+                    parent_flags,
+                    fa,
+                )
+                .expect("demand_map: map_to failed")
+                .flush();
+        }
+    }
+
+    /// Marks a thread as exited and zombie so the scheduler skips it.
+    pub fn kill_current_thread(&mut self, tid: TID) {
+        self.exit_thread(tid);   // Running -> Exited
+        self.set_zombie(tid);    // Exited  -> Zombie
+    }
+
 }
 
 
@@ -436,4 +505,43 @@ pub fn map_user_region_for_process(
     let off = mm.physical_memory_offset;
     PROCESS_MANAGER.lock()
         .map_user_region_for(pid, &mut mm.frame_allocator, off, start, size, leaf_flags, kind)
+}
+
+pub fn register_vma_only(
+    pid: PID,
+    start: VirtAddr,
+    size: usize,
+    flags: PageTableFlags,
+    kind: VmaKind,
+) {
+    PROCESS_MANAGER.lock().register_vma_only(pid, start, size, flags, kind);
+}
+
+/// Free function wrapper to handle an in-bounds page fault safely.
+pub fn demand_map_page(pid: PID, page_addr: VirtAddr, leaf_flags: PageTableFlags) {
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MM not initialised");
+    let off = mm.physical_memory_offset;
+
+    PROCESS_MANAGER.lock().demand_map_page(pid, page_addr, leaf_flags, &mut mm.frame_allocator, off);
+    drop(mm_guard);
+
+    // Zero the freshly-mapped page so we don't leak kernel data.
+    unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
+}
+
+/// Free function wrapper to kill the current thread and yield to the scheduler.
+pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
+    {
+        let mut sched = SCHEDULER.lock();
+        sched.remove_from_runnables(tid);
+        sched.current = None;          // critical: don't save our context
+    }
+    {
+        let mut pm = PROCESS_MANAGER.lock();
+        pm.kill_current_thread(tid);
+    }
+
+    crate::scheduler::scheduler::schedule();
+    crate::hlt_loop();
 }

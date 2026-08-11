@@ -8,6 +8,7 @@ pub enum VmaKind {
     Code,
     Data,
     Mapped,     // generic / mmap-style
+    User,
 }
 
 #[derive(Debug, Clone, Copy)]

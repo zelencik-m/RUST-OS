@@ -2,7 +2,7 @@
 pub mod gdt;
 
 
-// src/interrupts.rs
+// src/interrupts/mod.rs
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use lazy_static::lazy_static;
@@ -15,6 +15,17 @@ use crate::println;
 use crate::print;
 use crate::scheduler::scheduler::schedule;
 use crate::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now};
+use crate::PROCESS_MANAGER;
+use crate::process::PID;
+use crate::MEMORY_MANAGER;
+use crate::process::thread::TID;
+
+use x86_64::VirtAddr;
+use x86_64::structures::paging::PageTableFlags;
+use x86_64::structures::paging::Page;
+use x86_64::structures::paging::Size4KiB;
+use x86_64::structures::paging::FrameAllocator;
+use x86_64::structures::paging::Mapper;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -56,19 +67,49 @@ pub fn init_idt() {
     IDT.load();
 }
 
-
-
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
 
-    println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
-    println!("{:#?}", stack_frame);
-    hlt_loop();
+    let fault_addr = Cr2::read();
+    let page_addr  = Page::<Size4KiB>::containing_address(fault_addr).start_address();
+
+    // 1. Who faulted? Drop the scheduler lock immediately.
+    let tid = match SCHEDULER.lock().get_current() {
+        Some(t) => t,
+        None => panic!(
+            "PAGE FAULT in kernel, no current thread\n  addr: {:?}\n  err:  {:?}\n{:#?}",
+            fault_addr, error_code, stack_frame
+        ),
+    };
+
+    // 2. Ask ProcessManager if this fault is expected (in-bounds)
+    let (owner, vma_flags) = {
+        let pm = PROCESS_MANAGER.lock();
+        let owner = pm.thread(tid).get_owner();
+        let flags = pm.get_vma_flags(owner, fault_addr);
+        (owner, flags)
+    };
+
+    // 3. Act on the answer
+    match vma_flags {
+        // In-bounds: demand-page a single frame.
+        Some(leaf_flags) => {
+            crate::process::process_manager::demand_map_page(owner, page_addr, leaf_flags);
+            // return → iretq retries the faulting instruction
+        }
+
+        // Out-of-bounds: kill the process.
+        None => {
+            println!("PAGE FAULT: killing PID({}), TID({:?})", owner.0, tid);
+            println!("  faulting addr: {:?}", fault_addr);
+            println!("  error code:    {:?}", error_code);
+            println!("{:#?}", stack_frame);
+            crate::process::process_manager::kill_current_thread_and_schedule(tid);
+        }
+    }
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(
