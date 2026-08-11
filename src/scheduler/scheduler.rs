@@ -7,11 +7,12 @@ use spin::Mutex;
 use crate::process::process_manager::{switch_to, PROCESS_MANAGER};
 use crate::process::thread::ThreadState;
 use x86_64::instructions::interrupts;
+use crate::sync::{IrqSafeMutex};
 
 const TIME_SLICE: u64 = 2; // Number of ticks before a thread is preempted
 
 lazy_static! {
-    pub static ref SCHEDULER: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+    pub static ref SCHEDULER: IrqSafeMutex<Scheduler> = IrqSafeMutex::new(Scheduler::new());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,16 +120,14 @@ impl Scheduler {
 
 
 pub fn schedule() {
-    interrupts::without_interrupts(|| {
-        let mut scheduler = SCHEDULER.lock();
-        let next = scheduler.requeue_and_pick_next();
-        if let Some(tid) = next {
-            debugln!("Switching to thread {:?}", tid);
-            debugln!("Queue: {:?}", scheduler.runnables);
-            drop(scheduler); // release before touching PROCESS_MANAGER/switch_to
-            switch_to(tid);
-        }
-    });
+    let mut scheduler = SCHEDULER.lock();
+    let next = scheduler.requeue_and_pick_next();
+    if let Some(tid) = next {
+        debugln!("Switching to thread {:?}", tid);
+        debugln!("Queue: {:?}", scheduler.runnables);
+        drop(scheduler); // release before touching PROCESS_MANAGER/switch_to
+        switch_to(tid);
+    }
 }
 
 pub fn yield_now() {
@@ -136,17 +135,15 @@ pub fn yield_now() {
 }
 
 pub fn sleep(ticks: u64) {
-    interrupts::without_interrupts(|| {
-        let mut scheduler = SCHEDULER.lock();
-        if let Some(current_tid) = scheduler.get_current() {
-            debugln!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
-            let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
-            scheduler.sleep_queue.push_back(SleepThread { tid: current_tid, wakeup_tick });
-            PROCESS_MANAGER.lock().sleep_thread(current_tid);
-            drop(scheduler);
-        } else {
-            panic!("No current thread to sleep");
-        }
-    });
+    let mut scheduler = SCHEDULER.lock();
+    if let Some(current_tid) = scheduler.get_current() {
+        debugln!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
+        let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
+        scheduler.sleep_queue.push_back(SleepThread { tid: current_tid, wakeup_tick });
+        PROCESS_MANAGER.lock().sleep_thread(current_tid);
+        drop(scheduler);
+    } else {
+        panic!("No current thread to sleep");
+    }
     schedule();
 }

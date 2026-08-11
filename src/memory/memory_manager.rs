@@ -1,12 +1,14 @@
 // src/memory/memory_manager.rs
 
-use crate::memory;
 use memory::BootInfoFrameAllocator;
 use bootloader::bootinfo::MemoryMap;
 use x86_64::structures::paging::{mapper::MapToError, OffsetPageTable, Size4KiB};
 use x86_64::VirtAddr;
 use spin::Mutex;
+
+use crate::memory;
 use crate::memory::address_space::AddressSpace;
+use crate::sync::{IrqSafeMutex};
 
 pub struct MemoryManager {
     pub mapper: OffsetPageTable<'static>,
@@ -14,7 +16,7 @@ pub struct MemoryManager {
     pub physical_memory_offset: VirtAddr,
 }
 
-pub static MEMORY_MANAGER: Mutex<Option<MemoryManager>> = Mutex::new(None);
+pub static MEMORY_MANAGER: IrqSafeMutex<Option<MemoryManager>> = IrqSafeMutex::new(None);
 
 impl MemoryManager {
     pub unsafe fn new(

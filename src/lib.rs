@@ -15,6 +15,7 @@ pub mod interrupts;
 pub mod debug;
 pub mod process;
 pub mod scheduler;
+pub mod sync;
 
 extern crate alloc;
 
