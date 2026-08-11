@@ -1,0 +1,98 @@
+use alloc::boxed::Box;
+
+use crate::process::thread::{TID, Thread, ThreadState};
+use crate::process::PID;
+
+use super::manager::ProcessManager;
+
+impl ProcessManager {
+    pub fn create_thread_locked(&mut self, pid: PID, entry_point: extern "C" fn() -> !) -> TID {
+        let tid = if let Some(free_tid) = self.free_tids.pop() {
+            self.threads[free_tid.0 as usize] =
+                Some(Box::new(Thread::new(free_tid, pid, 4096 * 4, entry_point)));
+            free_tid
+        } else {
+            let tid = TID(self.threads.len() as u64);
+            self.threads
+                .push(Some(Box::new(Thread::new(tid, pid, 4096 * 4, entry_point))));
+            tid
+        };
+
+        self.process_mut(pid).threads.push(tid);
+        tid
+    }
+
+    pub fn create_idle_thread_locked(&mut self, entry: extern "C" fn() -> !) -> TID {
+        let kernel_pid = self.init_kernel_process();
+
+        let tid = if let Some(free_tid) = self.free_tids.pop() {
+            free_tid
+        } else {
+            TID(self.threads.len() as u64)
+        };
+
+        let thread = Box::new(Thread::new(tid, kernel_pid, 4096 * 4, entry));
+
+        if (tid.0 as usize) < self.threads.len() {
+            self.threads[tid.0 as usize] = Some(thread);
+        } else {
+            self.threads.push(Some(thread));
+        }
+
+        self.process_mut(kernel_pid).threads.push(tid);
+        tid
+    }
+
+    /// Remove a thread and recycle its TID.
+    ///
+    /// Callers MUST guarantee this thread is not the one currently executing —
+    /// see the free function `remove_thread`.
+    pub fn remove_thread_locked(&mut self, tid: TID) {
+        let pid = self.thread(tid).get_owner();
+        self.process_mut(pid).threads.retain(|&x| x != tid);
+
+        self.threads[tid.0 as usize] = None;
+        self.free_tids.push(tid);
+    }
+
+    // --- state transitions ---
+
+    pub fn block_thread(&mut self, tid: TID) {
+        self.thread_mut(tid).set_to_blocked();
+    }
+
+    pub fn sleep_thread(&mut self, tid: TID) {
+        self.thread_mut(tid).set_to_sleeping();
+    }
+
+    pub fn wait_thread(&mut self, tid: TID) {
+        self.thread_mut(tid).set_to_waiting();
+    }
+
+    /// Blocked/Sleeping/Waiting → Ready.
+    pub fn wake_thread(&mut self, tid: TID) {
+        self.thread_mut(tid).set_to_ready();
+    }
+
+    pub fn exit_thread(&mut self, tid: TID) {
+        self.thread_mut(tid).set_to_exited();
+    }
+
+    pub fn set_zombie(&mut self, tid: TID) {
+        self.thread_mut(tid).set_to_zombie();
+    }
+
+    pub fn preempt_thread(&mut self, tid: TID) {
+        self.thread_mut(tid).preempt_to_ready();
+    }
+
+    pub fn get_thread_state(&self, tid: TID) -> ThreadState {
+        self.thread(tid).get_state()
+    }
+
+    /// Marks a thread as exited and zombie so the scheduler skips it.
+    pub fn kill_current_thread(&mut self, tid: TID) {
+        self.exit_thread(tid); // Running -> Exited
+        self.set_zombie(tid);  // Exited  -> Zombie
+    }
+}

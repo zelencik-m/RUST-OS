@@ -89,7 +89,7 @@ impl Scheduler {
                     && pm.get_thread_state(sleep_thread.tid) == ThreadState::Sleeping
                 {
                     // Wake the thread: set state to Ready and add to run queue
-                    pm.set_thread_ready(sleep_thread.tid);
+                    pm.wake_thread(sleep_thread.tid);
                     drop(pm);
                     self.add_runnable(sleep_thread.tid);
                 } else {
