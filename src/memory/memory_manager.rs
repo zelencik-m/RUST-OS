@@ -4,7 +4,6 @@ use memory::BootInfoFrameAllocator;
 use bootloader::bootinfo::MemoryMap;
 use x86_64::structures::paging::{mapper::MapToError, OffsetPageTable, Size4KiB, Page, PageTableFlags, PageTable, PhysFrame, page_table::FrameError};
 use x86_64::VirtAddr;
-use spin::Mutex;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
 use alloc::vec::Vec;
@@ -64,7 +63,6 @@ impl MemoryManager {
         )
     }
 
-    /// Map a new contiguous region into the address space.
     pub fn mmap(
         &mut self,
         space: &mut AddressSpace,
@@ -72,41 +70,42 @@ impl MemoryManager {
         flags: PageTableFlags,
         kind: VmaKind,
     ) -> Result<VirtAddr, Oom> {
-        if size == 0 {
-            return Err(Oom);
-        }
+        if size == 0 { return Err(Oom); }
         
         let start = space.find_free_region(size as u64).ok_or(Oom)?;
-        
-        let parent_flags = PageTableFlags::PRESENT
-                         | PageTableFlags::WRITABLE
-                         | PageTableFlags::USER_ACCESSIBLE;
-                         
-        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
-        
         let start_page = Page::<Size4KiB>::containing_address(start);
         let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
         
-        for page in Page::range_inclusive(start_page, end_page) {
-            let frame = self.frame_allocator.allocate_frame().ok_or(Oom)?;
+        // 1. Allocate all frames first (Transactional)
+        let mut frames = Vec::new();
+        for _ in Page::range_inclusive(start_page, end_page) {
+            match self.frame_allocator.allocate_frame() {
+                Some(f) => frames.push(f),
+                None => {
+                    // Rollback: free any frames we already allocated
+                    for f in frames {
+                        unsafe { self.frame_allocator.free_frame(f); }
+                    }
+                    return Err(Oom);
+                }
+            }
+        }
+
+        // 2. Now map them (Mapping rarely fails unless there's a bug in our logic)
+        let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
+        
+        for (page, frame) in Page::range_inclusive(start_page, end_page).zip(frames.into_iter()) {
             unsafe {
                 mapper.map_to_with_table_flags(
-                    page,
-                    frame,
-                    flags | PageTableFlags::USER_ACCESSIBLE,
-                    parent_flags,
-                    &mut self.frame_allocator,
+                    page, frame, flags | PageTableFlags::USER_ACCESSIBLE,
+                    parent_flags, &mut self.frame_allocator,
                 ).map_err(|_| Oom)?.flush();
             }
         }
         
-        space.vmas.push(VmArea {
-            start,
-            size: size as u64,
-            flags,
-            kind,
-        });
-        
+        // 3. Commit the VMA
+        space.vmas.push(VmArea { start, size: size as u64, flags, kind });
         Ok(start)
     }
 
@@ -169,6 +168,16 @@ impl MemoryManager {
     ) -> Result<(), Oom> {
         if size == 0 { return Ok(()); }
         
+        let end_addr = start + size as u64;
+        for vma in &space.vmas {
+            let vma_end = vma.start + vma.size;
+            if start < vma_end && end_addr > vma.start {
+                // Overlap detected! In a real OS, you might unmap the old one first,
+                // but for now, returning an error is safer.
+                return Err(Oom); // Or create a specific MmapError::Overlap
+            }
+        }
+
         let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
         let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
         
@@ -347,5 +356,40 @@ impl MemoryManager {
         // Finally, free the P4 frame itself
         unsafe { self.frame_allocator.free_frame(p4_frame); }
         space.vmas.clear();
+    }
+
+    pub fn sys_brk(
+        &mut self,
+        space: &mut AddressSpace,
+        new_break: VirtAddr,
+    ) -> Result<VirtAddr, Oom> {
+        let current_break = space.heap_break;
+        if new_break == current_break { return Ok(current_break); }
+        
+        if new_break > current_break {
+            let map_start = VirtAddr::new((current_break.as_u64() + 0xFFF) & !0xFFF);
+            let map_end = VirtAddr::new((new_break.as_u64() + 0xFFF) & !0xFFF);
+            
+            if map_start < map_end {
+                let size = (map_end.as_u64() - map_start.as_u64()) as usize;
+                self.mmap_at(
+                    space, map_start, size,
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+                    VmaKind::Heap,
+                )?;
+            }
+            space.heap_break = new_break;
+            Ok(new_break)
+        } else {
+            let unmap_start = VirtAddr::new((new_break.as_u64() + 0xFFF) & !0xFFF);
+            let unmap_end = VirtAddr::new((current_break.as_u64() + 0xFFF) & !0xFFF);
+            
+            if unmap_start < unmap_end {
+                let size = (unmap_end.as_u64() - unmap_start.as_u64()) as usize;
+                self.munmap(space, unmap_start, size);
+            }
+            space.heap_break = new_break;
+            Ok(new_break)
+        }
     }
 }

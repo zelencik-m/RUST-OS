@@ -132,44 +132,6 @@ impl AddressSpace {
         }
     }
 
-    /// Implements the core logic for brk/sbrk.
-    pub fn sys_brk(
-        &mut self,
-        mm: &mut crate::memory::memory_manager::MemoryManager,
-        new_break: VirtAddr,
-    ) -> Result<VirtAddr, crate::memory::memory_manager::Oom> {
-        let current_break = self.heap_break;
-        
-        if new_break == current_break {
-            return Ok(current_break);
-        }
-        
-        if new_break > current_break {
-            let map_start = VirtAddr::new((current_break.as_u64() + 0xFFF) & !0xFFF);
-            let map_end = VirtAddr::new((new_break.as_u64() + 0xFFF) & !0xFFF);
-            
-            if map_start < map_end {
-                let size = (map_end.as_u64() - map_start.as_u64()) as usize;
-                mm.mmap_at(
-                    self, map_start, size,
-                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
-                    crate::memory::vma::VmaKind::Heap,
-                )?;
-            }
-            self.heap_break = new_break;
-            Ok(new_break)
-        } else {
-            let unmap_start = VirtAddr::new((new_break.as_u64() + 0xFFF) & !0xFFF);
-            let unmap_end = VirtAddr::new((current_break.as_u64() + 0xFFF) & !0xFFF);
-            
-            if unmap_start < unmap_end {
-                let size = (unmap_end.as_u64() - unmap_start.as_u64()) as usize;
-                mm.munmap(self, unmap_start, size);
-            }
-            self.heap_break = new_break;
-            Ok(new_break)
-        }
-    }
 }
 
 /// Build a mapper for a not-yet-active address space.

@@ -167,5 +167,5 @@ pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, crate::memory:
     let proc = pm_guard.process_mut(pid);
     let space = proc.address_space.as_mut().expect("Process has no address space");
     
-    space.sys_brk(mm, new_break)
+    mm.sys_brk(space, new_break)
 }
