@@ -1,13 +1,17 @@
+use alloc::vec::Vec;
 use x86_64::{
-    structures::paging::{FrameAllocator, PhysFrame, Size4KiB, PageTable, OffsetPageTable, Page, PageTableFlags, Mapper},
+    structures::paging::{
+        FrameAllocator, PhysFrame, Size4KiB, PageTable, OffsetPageTable, Page, PageTableFlags, Mapper,
+    },
     VirtAddr,
 };
-use alloc::vec::Vec;
 
 use crate::memory::paging::active_level_4_table;
+use crate::memory::vma::VmArea; // Required for tracking VMAs
 
 pub struct AddressSpace { 
-    pub p4_frame: PhysFrame<Size4KiB> 
+    pub p4_frame: PhysFrame<Size4KiB>,
+    pub vmas: Vec<VmArea>, // MILESTONE 1.1: VMA storage moved here
 }
 
 impl AddressSpace {
@@ -25,9 +29,12 @@ impl AddressSpace {
             p4[i] = kernel_p4[i].clone();
         }
 
-        AddressSpace { p4_frame }
+        // MILESTONE 1.3: Initialize empty vmas vector
+        AddressSpace { 
+            p4_frame,
+            vmas: Vec::new(), 
+        }
     }
-
 
     /// Build a mapper for an address space that may or may not be active.
     /// Tied to &mut self to prevent multiple simultaneous mutable borrows.
@@ -39,6 +46,52 @@ impl AddressSpace {
 
     pub fn cr3(&self) -> PhysFrame<Size4KiB> {
         self.p4_frame
+    }
+
+    pub fn find_free_region(&self, size: u64) -> Option<VirtAddr> {
+        // Standard x86_64 user space bounds
+        const USER_SPACE_START: u64 = 0x400000;             // 4MB typical start
+        const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_F000;  // Strict canonical limit
+
+        let mut sorted_vmas = self.vmas.clone();
+        sorted_vmas.sort_by_key(|v| v.start.as_u64());
+
+        let mut current = USER_SPACE_START;
+
+        for vma in sorted_vmas {
+            let vma_start = vma.start.as_u64();
+            
+            // Align current up to page boundary
+            let aligned_current = (current + 0xFFF) & !0xFFF;
+            
+            // Check if the gap before this VMA is large enough
+            if aligned_current + size <= vma_start {
+                return Some(VirtAddr::new(aligned_current));
+            }
+            
+            // Move current past this VMA
+            current = vma_start + vma.size;
+        }
+
+        // Check space after the last VMA
+        let aligned_current = (current + 0xFFF) & !0xFFF;
+        if aligned_current + size <= USER_SPACE_END {
+            Some(VirtAddr::new(aligned_current))
+        } else {
+            None
+        }
+    }
+
+    pub fn get_vma_flags(&self, addr: VirtAddr) -> Option<PageTableFlags> {
+        self.vmas
+            .iter()
+            .find(|v| {
+                let start = v.start.as_u64();
+                let end = start + v.size;
+                let a = addr.as_u64();
+                a >= start && a < end
+            })
+            .map(|v| v.flags)
     }
 }
 

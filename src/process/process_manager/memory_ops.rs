@@ -31,7 +31,8 @@ impl ProcessManager {
 
         let frames = map_user_region(space, fa, off, start, size, leaf_flags);
 
-        process.vmas.push(VmArea {
+        // MILESTONE 1.1: Push VMA to the AddressSpace instead of Process
+        space.vmas.push(VmArea {
             start,
             size: size as u64,
             flags: leaf_flags,
@@ -49,7 +50,12 @@ impl ProcessManager {
         kind: VmaKind,
     ) {
         let process = self.process_mut(pid);
-        process.vmas.push(VmArea {
+        let space = process
+            .address_space
+            .as_mut()
+            .expect("register_vma_only: kernel process has no address space");
+
+        space.vmas.push(VmArea {
             start,
             size: size as u64,
             flags,
@@ -57,17 +63,12 @@ impl ProcessManager {
         });
     }
 
+    // MILESTONE 1.2: Kept as a proxy for backwards compatibility.
+    // The actual logic now lives natively in AddressSpace.
     pub fn get_vma_flags(&self, pid: PID, addr: VirtAddr) -> Option<PageTableFlags> {
         let proc = self.process(pid);
-        proc.vmas
-            .iter()
-            .find(|v| {
-                let start = v.start.as_u64();
-                let end = start + v.size;
-                let a = addr.as_u64();
-                a >= start && a < end
-            })
-            .map(|v| v.flags)
+        let space = proc.address_space.as_ref()?;
+        space.get_vma_flags(addr)
     }
 
     /// Maps a single frame for a faulting process (Demand Paging).

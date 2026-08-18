@@ -1,5 +1,3 @@
-// src/process/mod.rs
-
 pub mod process_manager;
 pub mod thread;
 pub mod idle;
@@ -46,7 +44,7 @@ pub struct Process {
     identity: ProcessIdentity,
     pub threads: Vec<TID>,
     pub address_space: Option<AddressSpace>,
-    pub vmas: Vec<VmArea>,
+    // MILESTONE 1.1: `vmas` has been removed from Process and moved to AddressSpace
 }
 
 impl Process {
@@ -61,7 +59,6 @@ impl Process {
                 }, 
             threads: Vec::new(),
             address_space: None,
-            vmas: Vec::new(),
             }
     }
 
@@ -78,5 +75,4 @@ impl Process {
         p.address_space = Some(space);
         p
     }
-    
 }
