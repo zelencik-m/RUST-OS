@@ -7,6 +7,7 @@ use x86_64::VirtAddr;
 use spin::Mutex;
 use x86_64::structures::paging::FrameAllocator;
 use x86_64::structures::paging::Mapper;
+use alloc::vec::Vec;
 
 use crate::memory;
 use crate::memory::address_space::AddressSpace;
@@ -123,42 +124,6 @@ impl MemoryManager {
         });
     }
 
-    /// Unmap a region, freeing its frames and removing/splitting VMAs.
-    pub fn munmap(
-        &mut self,
-        space: &mut AddressSpace,
-        addr: VirtAddr,
-        size: usize,
-    ) {
-        if size == 0 {
-            return;
-        }
-
-        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
-        
-        let start_page = Page::<Size4KiB>::containing_address(addr);
-        let end_page = Page::<Size4KiB>::containing_address(addr + (size as u64 - 1));
-        
-        for page in Page::range_inclusive(start_page, end_page) {
-            if let Ok((frame, flush)) = mapper.unmap(page) {
-                unsafe {
-                    self.frame_allocator.free_frame(frame);
-                }
-                flush.flush();
-            }
-        }
-        
-        let unmap_start = addr.as_u64();
-        let unmap_end = unmap_start + size as u64;
-
-        // Remove VMAs completely covered by the unmap request
-        space.vmas.retain(|vma| {
-            let vma_start = vma.start.as_u64();
-            let vma_end = vma_start + vma.size;
-            !(vma_start >= unmap_start && vma_end <= unmap_end)
-        });
-    }
-
     /// Map a single page on demand (used by the page fault handler).
     pub fn demand_map_page(
         &mut self,
@@ -191,10 +156,116 @@ impl MemoryManager {
         Ok(())
     }
 
+    pub fn mmap_at(
+        &mut self,
+        space: &mut AddressSpace,
+        start: VirtAddr,
+        size: usize,
+        flags: PageTableFlags,
+        kind: VmaKind,
+    ) -> Result<(), Oom> {
+        if size == 0 { return Ok(()); }
+        
+        let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
+        
+        let start_page = Page::<Size4KiB>::containing_address(start);
+        let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
+        
+        for page in Page::range_inclusive(start_page, end_page) {
+            let frame = self.frame_allocator.allocate_frame().ok_or(Oom)?;
+            unsafe {
+                mapper.map_to_with_table_flags(
+                    page, frame, flags | PageTableFlags::USER_ACCESSIBLE,
+                    parent_flags, &mut self.frame_allocator,
+                ).map_err(|_| Oom)?.flush();
+            }
+        }
+        
+        space.vmas.push(VmArea { start, size: size as u64, flags, kind });
+        Ok(())
+    }
+
+    /// Upgraded munmap that correctly shrinks and splits VMAs.
+    pub fn munmap(&mut self, space: &mut AddressSpace, addr: VirtAddr, size: usize) {
+        if size == 0 { return; }
+
+        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
+        let start_page = Page::<Size4KiB>::containing_address(addr);
+        let end_page = Page::<Size4KiB>::containing_address(addr + (size as u64 - 1));
+        
+        for page in Page::range_inclusive(start_page, end_page) {
+            if let Ok((frame, flush)) = mapper.unmap(page) {
+                unsafe { self.frame_allocator.free_frame(frame); }
+                flush.flush();
+            }
+        }
+        
+        let unmap_start = addr.as_u64();
+        let unmap_end = unmap_start + size as u64;
+
+        // Smart VMA shrink/split logic
+        let mut new_vmas = Vec::new();
+        for mut vma in space.vmas.drain(..) {
+            let vma_start = vma.start.as_u64();
+            let vma_end = vma_start + vma.size;
+            
+            if vma_start >= unmap_start && vma_end <= unmap_end {
+                continue; // Completely covered, drop it
+            } else if vma_start < unmap_start && vma_end > unmap_start && vma_end <= unmap_end {
+                vma.size = unmap_start - vma_start; // Shrink from end
+                new_vmas.push(vma);
+            } else if vma_start >= unmap_start && vma_start < unmap_end && vma_end > unmap_end {
+                vma.size = vma_end - unmap_end; // Shrink from start
+                vma.start = VirtAddr::new(unmap_end);
+                new_vmas.push(vma);
+            } else if vma_start < unmap_start && vma_end > unmap_end {
+                // Split in the middle
+                let left_size = unmap_start - vma_start;
+                let right_start = unmap_end;
+                let right_size = vma_end - unmap_end;
+                
+                new_vmas.push(VmArea { start: vma.start, size: left_size, flags: vma.flags, kind: vma.kind });
+                new_vmas.push(VmArea { start: VirtAddr::new(right_start), size: right_size, flags: vma.flags, kind: vma.kind });
+            } else {
+                new_vmas.push(vma); // No overlap
+            }
+        }
+        space.vmas = new_vmas;
+    }
+
+    /// Milestone 4.1: Allocate a user stack with a guard page.
+    pub fn allocate_user_stack(&mut self, space: &mut AddressSpace) -> Result<VirtAddr, Oom> {
+        const STACK_PAGES: usize = 16; // 64KB stack
+        const GUARD_PAGES: usize = 1;
+        let total_pages = STACK_PAGES + GUARD_PAGES;
+        let total_size = total_pages * 4096;
+
+        let start = space.find_free_region_top_down(total_size as u64).ok_or(Oom)?;
+
+        // 1. Register Guard Page (Bottom-most page)
+        space.vmas.push(VmArea {
+            start,
+            size: 4096,
+            flags: PageTableFlags::USER_ACCESSIBLE, // NOT Present
+            kind: VmaKind::Guard,
+        });
+
+        // 2. Map Stack Pages
+        let stack_start = start + 4096u64;
+        let stack_size = STACK_PAGES * 4096;
+        
+        self.mmap_at(
+            space, stack_start, stack_size, 
+            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE, 
+            VmaKind::Stack
+        )?;
+
+        // 3. Return initial RSP (Top of the stack)
+        Ok(stack_start + stack_size as u64)
+    }
+
     /// Handle a page fault for a specific address space.
-    /// Returns `FaultAction::Resolved` if the fault was handled (demand paged),
-    /// `FaultAction::Segfault` if the address is out of bounds,
-    /// or `PageFaultError` if an error occurred (e.g., OOM).
     pub fn handle_page_fault(
         &mut self,
         space: &mut AddressSpace,
@@ -202,17 +273,20 @@ impl MemoryManager {
     ) -> Result<FaultAction, PageFaultError> {
         let page_addr = Page::<Size4KiB>::containing_address(fault_addr).start_address();
         
-        if let Some(leaf_flags) = space.get_vma_flags(fault_addr) {
+        if let Some(vma) = space.get_vma(fault_addr) {
+            // Catch stack overflows hitting the guard page
+            if vma.kind == VmaKind::Guard {
+                return Ok(FaultAction::Segfault);
+            }
+            
             // In a VMA, demand map it
-            self.demand_map_page(space, page_addr, leaf_flags)
+            self.demand_map_page(space, page_addr, vma.flags)
                 .map(|_| {
-                    // Zero the page to prevent data leaks
                     unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
                     FaultAction::Resolved
                 })
                 .map_err(|_| PageFaultError)
         } else {
-            // Out of bounds
             Ok(FaultAction::Segfault)
         }
     }

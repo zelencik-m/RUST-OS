@@ -13,7 +13,8 @@ use crate::memory::vma::VmArea; // Required for tracking VMAs
 
 pub struct AddressSpace { 
     pub p4_frame: PhysFrame<Size4KiB>,
-    pub vmas: Vec<VmArea>, // MILESTONE 1.1: VMA storage moved here
+    pub vmas: Vec<VmArea>,
+    pub heap_break: VirtAddr, // Added for Milestone 4.2
 }
 
 impl AddressSpace {
@@ -31,10 +32,10 @@ impl AddressSpace {
             p4[i] = kernel_p4[i].clone();
         }
 
-        // MILESTONE 1.3: Initialize empty vmas vector
         AddressSpace { 
             p4_frame,
             vmas: Vec::new(), 
+            heap_break: VirtAddr::new(0x600000),
         }
     }
 
@@ -94,6 +95,80 @@ impl AddressSpace {
                 a >= start && a < end
             })
             .map(|v| v.flags)
+    }
+
+    pub fn get_vma(&self, addr: VirtAddr) -> Option<&VmArea> {
+        self.vmas.iter().find(|v| v.contains(addr))
+    }
+
+    /// Find a free memory region starting from the top of user space downwards.
+    /// Used primarily for allocating user stacks.
+    pub fn find_free_region_top_down(&self, size: u64) -> Option<VirtAddr> {
+        const USER_SPACE_START: u64 = 0x400000;
+        const USER_SPACE_END: u64 = 0x0000_7FFF_FFFF_F000;
+
+        let mut sorted_vmas = self.vmas.clone();
+        sorted_vmas.sort_by_key(|v| core::cmp::Reverse(v.start.as_u64()));
+
+        let mut current = USER_SPACE_END;
+
+        for vma in sorted_vmas {
+            let vma_end = vma.start.as_u64() + vma.size;
+            let aligned_end = current & !0xFFF;
+            let region_start = aligned_end.checked_sub(size)?;
+            
+            if region_start >= vma_end {
+                return Some(VirtAddr::new(region_start));
+            }
+            current = vma.start.as_u64();
+        }
+
+        let aligned_end = current & !0xFFF;
+        let region_start = aligned_end.checked_sub(size)?;
+        if region_start >= USER_SPACE_START {
+            Some(VirtAddr::new(region_start))
+        } else {
+            None
+        }
+    }
+
+    /// Implements the core logic for brk/sbrk.
+    pub fn sys_brk(
+        &mut self,
+        mm: &mut crate::memory::memory_manager::MemoryManager,
+        new_break: VirtAddr,
+    ) -> Result<VirtAddr, crate::memory::memory_manager::Oom> {
+        let current_break = self.heap_break;
+        
+        if new_break == current_break {
+            return Ok(current_break);
+        }
+        
+        if new_break > current_break {
+            let map_start = VirtAddr::new((current_break.as_u64() + 0xFFF) & !0xFFF);
+            let map_end = VirtAddr::new((new_break.as_u64() + 0xFFF) & !0xFFF);
+            
+            if map_start < map_end {
+                let size = (map_end.as_u64() - map_start.as_u64()) as usize;
+                mm.mmap_at(
+                    self, map_start, size,
+                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+                    crate::memory::vma::VmaKind::Heap,
+                )?;
+            }
+            self.heap_break = new_break;
+            Ok(new_break)
+        } else {
+            let unmap_start = VirtAddr::new((new_break.as_u64() + 0xFFF) & !0xFFF);
+            let unmap_end = VirtAddr::new((current_break.as_u64() + 0xFFF) & !0xFFF);
+            
+            if unmap_start < unmap_end {
+                let size = (unmap_end.as_u64() - unmap_start.as_u64()) as usize;
+                mm.munmap(self, unmap_start, size);
+            }
+            self.heap_break = new_break;
+            Ok(new_break)
+        }
     }
 }
 

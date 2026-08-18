@@ -4,21 +4,33 @@ use alloc::boxed::Box;
 
 use crate::process::thread::{TID, Thread, ThreadState};
 use crate::process::PID;
+use crate::memory::memory_manager::MEMORY_MANAGER;
 
 use super::manager::ProcessManager;
 
 impl ProcessManager {
     pub fn create_thread_locked(&mut self, pid: PID, entry_point: extern "C" fn() -> !) -> TID {
         let tid = if let Some(free_tid) = self.free_tids.pop() {
-            self.threads[free_tid.0 as usize] =
-                Some(Box::new(Thread::new(free_tid, pid, 4096 * 4, entry_point)));
+            self.threads[free_tid.0 as usize] = Some(Box::new(Thread::new(free_tid, pid, 4096 * 4, entry_point)));
             free_tid
         } else {
             let tid = TID(self.threads.len() as u64);
-            self.threads
-                .push(Some(Box::new(Thread::new(tid, pid, 4096 * 4, entry_point))));
+            self.threads.push(Some(Box::new(Thread::new(tid, pid, 4096 * 4, entry_point))));
             tid
         };
+
+        // MILESTONE 4.1: Automatically allocate a user stack if this is a user process
+        let proc = self.process_mut(pid);
+        if let Some(space) = proc.address_space.as_mut() {
+            let mut mm_guard = MEMORY_MANAGER.lock();
+            if let Some(mm) = mm_guard.as_mut() {
+                if let Ok(stack_top) = mm.allocate_user_stack(space) {
+                    if let Some(t_opt) = self.threads[tid.0 as usize].as_mut() {
+                        t_opt.user_stack_top = Some(stack_top);
+                    }
+                }
+            }
+        }
 
         self.process_mut(pid).threads.push(tid);
         tid

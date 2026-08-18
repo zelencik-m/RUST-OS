@@ -3,7 +3,7 @@
 use x86_64::VirtAddr;
 use x86_64::structures::paging::PageTableFlags;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmaKind {
     Stack,
     Heap,
@@ -11,6 +11,7 @@ pub enum VmaKind {
     Data,
     Mapped,     // generic / mmap-style
     User,
+    Guard,      // Added for stack guard pages
 }
 
 #[derive(Debug, Clone, Copy)]

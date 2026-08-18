@@ -154,3 +154,13 @@ pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
     crate::scheduler::scheduler::schedule();
     crate::hlt_loop();
 }
+
+pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, crate::memory::memory_manager::Oom> {
+    let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+    let mut pm_guard = PROCESS_MANAGER.lock();
+    let proc = pm_guard.process_mut(pid);
+    let space = proc.address_space.as_mut().expect("Process has no address space");
+    
+    space.sys_brk(mm, new_break)
+}

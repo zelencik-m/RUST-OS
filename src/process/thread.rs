@@ -4,6 +4,7 @@ use alloc::alloc::{alloc_zeroed, dealloc};
 use core::alloc::Layout;
 use core::arch::global_asm;
 use crate::{debug, println};
+use x86_64::VirtAddr;
 
 use crate::process::PID;
 
@@ -51,6 +52,7 @@ pub struct Thread {
     stack_layout: Layout,
 
     context: ThreadContext,
+    pub user_stack_top: Option<VirtAddr>,
 }
 
 // SAFETY: `stack_ptr` is heap memory uniquely owned by this `Thread`.
@@ -117,12 +119,10 @@ impl Thread {
         let rsp = stack_top - 64;
 
         Thread {
-            tid,
-            owner,
-            state: ThreadState::Ready,
-            stack_ptr: raw,
-            stack_layout: layout,
+            tid, owner, state: ThreadState::Ready,
+            stack_ptr: raw, stack_layout: layout,
             context: ThreadContext { rsp },
+            user_stack_top: None, // Initialize to None
         }
     }
 
