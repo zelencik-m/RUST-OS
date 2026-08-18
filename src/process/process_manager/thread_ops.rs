@@ -1,11 +1,11 @@
 // src/process/process_manager/thread_ops.rs
 
 use alloc::boxed::Box;
+use x86_64::registers::control::Cr3;
 
 use crate::process::thread::{TID, Thread, ThreadState};
 use crate::process::PID;
 use crate::memory::memory_manager::MEMORY_MANAGER;
-
 use super::manager::ProcessManager;
 
 impl ProcessManager {
@@ -104,9 +104,29 @@ impl ProcessManager {
         self.thread(tid).get_state()
     }
 
-    /// Marks a thread as exited and zombie so the scheduler skips it.
     pub fn kill_current_thread(&mut self, tid: TID) {
         self.exit_thread(tid); // Running -> Exited
         self.set_zombie(tid);  // Exited  -> Zombie
+        
+        let owner = self.thread(tid).get_owner();
+        
+        // Check if any OTHER thread in this process is still alive
+        let has_living_threads = self.process(owner).threads.iter().any(|&t| {
+            let state = self.thread(t).get_state();
+            t != tid && state != ThreadState::Exited && state != ThreadState::Zombie
+        });
+        
+        if !has_living_threads {
+            if let Some(mut space) = self.process_mut(owner).address_space.take() {
+                let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
+                if let Some(mm) = mm_guard.as_mut() {
+                    // CRITICAL: Switch to kernel CR3 before freeing the user page tables!
+                    let (_, flags) = Cr3::read();
+                    unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
+                    
+                    mm.destroy_address_space(&mut space);
+                }
+            }
+        }
     }
 }

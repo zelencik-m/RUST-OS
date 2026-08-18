@@ -2,7 +2,7 @@
 
 use memory::BootInfoFrameAllocator;
 use bootloader::bootinfo::MemoryMap;
-use x86_64::structures::paging::{mapper::MapToError, OffsetPageTable, Size4KiB, Page, PageTableFlags};
+use x86_64::structures::paging::{mapper::MapToError, OffsetPageTable, Size4KiB, Page, PageTableFlags, PageTable, PhysFrame, page_table::FrameError};
 use x86_64::VirtAddr;
 use spin::Mutex;
 use x86_64::structures::paging::FrameAllocator;
@@ -30,6 +30,7 @@ pub struct MemoryManager {
     pub mapper: OffsetPageTable<'static>,
     pub frame_allocator: BootInfoFrameAllocator,
     pub physical_memory_offset: VirtAddr,
+    pub kernel_p4_frame: PhysFrame<Size4KiB>, // Added for Milestone 5.2
 }
 
 pub static MEMORY_MANAGER: IrqSafeMutex<Option<MemoryManager>> = IrqSafeMutex::new(None);
@@ -42,11 +43,13 @@ impl MemoryManager {
         let phys_mem_offset = VirtAddr::new(physical_memory_offset);
         let mapper = memory::paging::init(phys_mem_offset);
         let frame_allocator = BootInfoFrameAllocator::init(memory_map);
+        let (kernel_p4_frame, _) = x86_64::registers::control::Cr3::read(); // Save boot CR3
 
         MemoryManager {
             mapper,
             frame_allocator,
             physical_memory_offset: phys_mem_offset,
+            kernel_p4_frame,
         }
     }
 
@@ -234,7 +237,6 @@ impl MemoryManager {
         space.vmas = new_vmas;
     }
 
-    /// Milestone 4.1: Allocate a user stack with a guard page.
     pub fn allocate_user_stack(&mut self, space: &mut AddressSpace) -> Result<VirtAddr, Oom> {
         const STACK_PAGES: usize = 16; // 64KB stack
         const GUARD_PAGES: usize = 1;
@@ -289,5 +291,61 @@ impl MemoryManager {
         } else {
             Ok(FaultAction::Segfault)
         }
+    }
+
+    pub fn destroy_address_space(&mut self, space: &mut AddressSpace) {
+        let p4_frame = space.p4_frame;
+        let p4_ptr = (self.physical_memory_offset + p4_frame.start_address().as_u64()).as_mut_ptr();
+        let p4: &mut PageTable = unsafe { &mut *p4_ptr };
+
+        // Iterate only over the lower half (user space: indices 0..256)
+        // The upper half contains cloned kernel mappings which we MUST NOT free.
+        for (i, p4_entry) in p4.iter_mut().enumerate() {
+            if i >= 256 { break; }
+            
+            match p4_entry.frame() {
+                Ok(p3_frame) => {
+                    let p3_ptr = (self.physical_memory_offset + p3_frame.start_address().as_u64()).as_mut_ptr();
+                    let p3: &mut PageTable = unsafe { &mut *p3_ptr };
+                    
+                    for p3_entry in p3.iter_mut() {
+                        match p3_entry.frame() {
+                            Ok(p2_frame) => {
+                                let p2_ptr = (self.physical_memory_offset + p2_frame.start_address().as_u64()).as_mut_ptr();
+                                let p2: &mut PageTable = unsafe { &mut *p2_ptr };
+                                
+                                for p2_entry in p2.iter_mut() {
+                                    match p2_entry.frame() {
+                                        Ok(p1_frame) => {
+                                            let p1_ptr = (self.physical_memory_offset + p1_frame.start_address().as_u64()).as_mut_ptr();
+                                            let p1: &mut PageTable = unsafe { &mut *p1_ptr };
+                                            
+                                            for p1_entry in p1.iter_mut() {
+                                                if let Ok(frame) = p1_entry.frame() {
+                                                    unsafe { self.frame_allocator.free_frame(frame); }
+                                                }
+                                            }
+                                            unsafe { self.frame_allocator.free_frame(p1_frame); }
+                                        }
+                                        Err(FrameError::HugeFrame) => {} // 2MB pages not currently used
+                                        Err(FrameError::FrameNotPresent) => {}
+                                    }
+                                }
+                                unsafe { self.frame_allocator.free_frame(p2_frame); }
+                            }
+                            Err(FrameError::HugeFrame) => {} // 1GB pages not currently used
+                            Err(FrameError::FrameNotPresent) => {}
+                        }
+                    }
+                    unsafe { self.frame_allocator.free_frame(p3_frame); }
+                }
+                Err(FrameError::HugeFrame) => {}
+                Err(FrameError::FrameNotPresent) => {}
+            }
+        }
+        
+        // Finally, free the P4 frame itself
+        unsafe { self.frame_allocator.free_frame(p4_frame); }
+        space.vmas.clear();
     }
 }

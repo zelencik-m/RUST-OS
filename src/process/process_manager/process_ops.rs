@@ -2,6 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use x86_64::registers::control::Cr3;
 
 use crate::memory::address_space::AddressSpace;
 use crate::process::thread::TID;
@@ -77,11 +78,26 @@ impl ProcessManager {
         pid
     }
 
-    pub fn destroy_process(&mut self, pid: PID) {
+pub fn destroy_process(&mut self, pid: PID) {
         let tids: Vec<TID> = self.process(pid).threads.clone();
         for tid in tids {
             self.remove_thread_locked(tid);
         }
+        
+        if let Some(mut space) = self.process_mut(pid).address_space.take() {
+            let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
+            if let Some(mm) = mm_guard.as_mut() {
+                let (_, flags) = Cr3::read();
+                let current_cr3 = Cr3::read().0;
+                
+                // If we are somehow destroying the currently active process, switch CR3 first
+                if current_cr3 == space.cr3() {
+                    unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
+                }
+                mm.destroy_address_space(&mut space);
+            }
+        }
+        
         self.processes[pid.0 as usize] = None;
         self.free_pids.push(pid);
     }

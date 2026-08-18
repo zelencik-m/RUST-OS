@@ -60,7 +60,6 @@ pub fn switch_to(tid: TID) {
     let mut pm = PROCESS_MANAGER.lock();
 
     let new_owner = pm.thread(tid).get_owner();
-
     debugln!("Thread: {:?}, Process:{:?}", tid, new_owner);
 
     let changing = scheduler
@@ -74,6 +73,12 @@ pub fn switch_to(tid: TID) {
             let (_, flags) = Cr3::read();
             unsafe { Cr3::write(space.cr3(), flags); }
             debugln!("[CR3 switch] to PID {}", new_owner.0);
+        } else {
+            let mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
+            let mm = mm_guard.as_ref().expect("MM init");
+            let (_, flags) = Cr3::read();
+            unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
+            debugln!("[CR3 switch] to Kernel");
         }
     }
 
