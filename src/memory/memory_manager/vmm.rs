@@ -1,0 +1,166 @@
+// src/memory/memory_manager/vmm.rs
+
+use super::MemoryManager;
+use crate::memory::address_space::AddressSpace;
+use crate::memory::vma::{VmArea, VmaKind};
+use x86_64::{
+    structures::paging::{Page, PageTableFlags, Size4KiB, Mapper, FrameAllocator},
+    VirtAddr,
+};
+use alloc::vec::Vec;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Oom;
+
+impl MemoryManager {
+     pub fn mmap(
+        &mut self,
+        space: &mut AddressSpace,
+        size: usize,
+        flags: PageTableFlags,
+        kind: VmaKind,
+    ) -> Result<VirtAddr, Oom> {
+        if size == 0 { return Err(Oom); }
+        
+        let start = space.find_free_region(size as u64).ok_or(Oom)?;
+        let start_page = Page::<Size4KiB>::containing_address(start);
+        let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
+        
+        // 1. Allocate all frames first (Transactional)
+        let mut frames = Vec::new();
+        for _ in Page::range_inclusive(start_page, end_page) {
+            match self.frame_allocator.allocate_frame() {
+                Some(f) => frames.push(f),
+                None => {
+                    // Rollback: free any frames we already allocated
+                    for f in frames {
+                        unsafe { self.frame_allocator.free_frame(f); }
+                    }
+                    return Err(Oom);
+                }
+            }
+        }
+
+        // 2. Now map them (Mapping rarely fails unless there's a bug in our logic)
+        let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
+        
+        for (page, frame) in Page::range_inclusive(start_page, end_page).zip(frames.into_iter()) {
+            unsafe {
+                mapper.map_to_with_table_flags(
+                    page, frame, flags | PageTableFlags::USER_ACCESSIBLE,
+                    parent_flags, &mut self.frame_allocator,
+                ).map_err(|_| Oom)?.flush();
+            }
+        }
+        
+        // 3. Commit the VMA
+        space.vmas.push(VmArea { start, size: size as u64, flags, kind });
+        Ok(start)
+    }
+
+ pub fn mmap_at(
+        &mut self,
+        space: &mut AddressSpace,
+        start: VirtAddr,
+        size: usize,
+        flags: PageTableFlags,
+        kind: VmaKind,
+    ) -> Result<(), Oom> {
+        if size == 0 { return Ok(()); }
+        
+        let end_addr = start + size as u64;
+        for vma in &space.vmas {
+            let vma_end = vma.start + vma.size;
+            if start < vma_end && end_addr > vma.start {
+                // Overlap detected! In a real OS, you might unmap the old one first,
+                // but for now, returning an error is safer.
+                return Err(Oom); // Or create a specific MmapError::Overlap
+            }
+        }
+
+        let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
+        
+        let start_page = Page::<Size4KiB>::containing_address(start);
+        let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
+        
+        for page in Page::range_inclusive(start_page, end_page) {
+            let frame = self.frame_allocator.allocate_frame().ok_or(Oom)?;
+            unsafe {
+                mapper.map_to_with_table_flags(
+                    page, frame, flags | PageTableFlags::USER_ACCESSIBLE,
+                    parent_flags, &mut self.frame_allocator,
+                ).map_err(|_| Oom)?.flush();
+            }
+        }
+        
+        space.vmas.push(VmArea { start, size: size as u64, flags, kind });
+        Ok(())
+    }
+
+    /// Upgraded munmap that correctly shrinks and splits VMAs.
+    pub fn munmap(&mut self, space: &mut AddressSpace, addr: VirtAddr, size: usize) {
+        if size == 0 { return; }
+
+        let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
+        let start_page = Page::<Size4KiB>::containing_address(addr);
+        let end_page = Page::<Size4KiB>::containing_address(addr + (size as u64 - 1));
+        
+        for page in Page::range_inclusive(start_page, end_page) {
+            if let Ok((frame, flush)) = mapper.unmap(page) {
+                unsafe { self.frame_allocator.free_frame(frame); }
+                flush.flush();
+            }
+        }
+        
+        let unmap_start = addr.as_u64();
+        let unmap_end = unmap_start + size as u64;
+
+        // Smart VMA shrink/split logic
+        let mut new_vmas = Vec::new();
+        for mut vma in space.vmas.drain(..) {
+            let vma_start = vma.start.as_u64();
+            let vma_end = vma_start + vma.size;
+            
+            if vma_start >= unmap_start && vma_end <= unmap_end {
+                continue; // Completely covered, drop it
+            } else if vma_start < unmap_start && vma_end > unmap_start && vma_end <= unmap_end {
+                vma.size = unmap_start - vma_start; // Shrink from end
+                new_vmas.push(vma);
+            } else if vma_start >= unmap_start && vma_start < unmap_end && vma_end > unmap_end {
+                vma.size = vma_end - unmap_end; // Shrink from start
+                vma.start = VirtAddr::new(unmap_end);
+                new_vmas.push(vma);
+            } else if vma_start < unmap_start && vma_end > unmap_end {
+                // Split in the middle
+                let left_size = unmap_start - vma_start;
+                let right_start = unmap_end;
+                let right_size = vma_end - unmap_end;
+                
+                new_vmas.push(VmArea { start: vma.start, size: left_size, flags: vma.flags, kind: vma.kind });
+                new_vmas.push(VmArea { start: VirtAddr::new(right_start), size: right_size, flags: vma.flags, kind: vma.kind });
+            } else {
+                new_vmas.push(vma); // No overlap
+            }
+        }
+        space.vmas = new_vmas;
+    }
+
+        /// Register a VMA without mapping physical frames (used for setting up demand paging regions).
+    pub fn register_vma(
+        &mut self,
+        space: &mut AddressSpace,
+        start: VirtAddr,
+        size: usize,
+        flags: PageTableFlags,
+        kind: VmaKind,
+    ) {
+        space.vmas.push(VmArea {
+            start,
+            size: size as u64,
+            flags,
+            kind,
+        });
+    }
+}
