@@ -4,7 +4,6 @@ use super::MemoryManager;
 use super::vmm::Oom; // Import Oom from sibling module
 use crate::memory::address_space::AddressSpace;
 use crate::memory::vma::VmaKind;
-use crate::memory::VmArea;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB, Mapper, FrameAllocator};
 use x86_64::VirtAddr;
 
