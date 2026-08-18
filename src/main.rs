@@ -66,7 +66,7 @@ fn panic(info: &PanicInfo) -> ! {
 extern "C" fn thread_a() -> ! {
     use rust_os::scheduler::scheduler::SCHEDULER;
 
-    println!("[thread_a] starting demand paging checkpoint...");
+    debugln!("[thread_a] starting demand paging checkpoint...");
 
     // 1. Get current TID and PID
     let tid = SCHEDULER.lock().get_current().expect("no current thread");
@@ -88,7 +88,7 @@ extern "C" fn thread_a() -> ! {
         *p = 0xCAFEBABE; // Traps here, handler maps page, returns, and executes store again
         assert_eq!(*p, 0xCAFEBABE);
     }
-    println!("[thread_a] in-bounds demand paging test passed!");
+    debugln!("[thread_a] in-bounds demand paging test passed!");
 
     // 4. Out-of-bounds access: should trigger #PF and kill this process
     unsafe {
@@ -96,7 +96,7 @@ extern "C" fn thread_a() -> ! {
         *p = 1; // Traps here, handler detects out-of-bounds, kills process
     }
     
-    println!("[thread_a] this line should never print");
+    debugln!("[thread_a] this line should never print");
     
     loop {
         yield_now();

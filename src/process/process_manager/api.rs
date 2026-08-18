@@ -1,3 +1,5 @@
+// src/process/process_manager/api.rs
+
 //! Free-function wrappers that orchestrate locking across subsystems.
 //!
 //! Lock order is always: **Scheduler → ProcessManager → MemoryManager**.
@@ -12,7 +14,7 @@ use x86_64::VirtAddr;
 
 use crate::debugln;
 use crate::memory::address_space::AddressSpace;
-use crate::memory::memory_manager::MEMORY_MANAGER;
+use crate::memory::memory_manager::{MEMORY_MANAGER, Oom};
 use crate::memory::vma::VmaKind;
 use crate::process::thread::{self, TID};
 use crate::process::PID;
@@ -53,12 +55,6 @@ pub fn create_idle_thread(entry: extern "C" fn() -> !) -> TID {
     tid
 }
 
-/// Switch execution to `tid`.
-///
-/// This is a free function (not a method) so the `PROCESS_MANAGER` lock is
-/// released **before** the actual context switch — the switch doesn't return
-/// until some other thread switches back, so holding the lock across it would
-/// deadlock anyone else who needs the process manager.
 pub fn switch_to(tid: TID) {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
@@ -113,23 +109,18 @@ pub fn create_user_process(name: String) -> PID {
 
 pub fn map_user_region_for_process(
     pid: PID,
-    start: VirtAddr,
+    _start: VirtAddr, // Unused since `mmap` finds its own region
     size: usize,
     leaf_flags: PageTableFlags,
     kind: VmaKind,
-) -> Vec<PhysFrame<Size4KiB>> {
-    let mut mm = MEMORY_MANAGER.lock();
-    let mm = mm.as_mut().expect("MemoryManager not initialized");
-    let off = mm.physical_memory_offset;
-    PROCESS_MANAGER.lock().map_user_region_for(
-        pid,
-        &mut mm.frame_allocator,
-        off,
-        start,
-        size,
-        leaf_flags,
-        kind,
-    )
+) -> Result<VirtAddr, Oom> {
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+    let mut pm_guard = PROCESS_MANAGER.lock();
+    let proc = pm_guard.process_mut(pid);
+    let space = proc.address_space.as_mut().expect("Process has no address space");
+    
+    mm.mmap(space, size, leaf_flags, kind)
 }
 
 pub fn register_vma_only(
@@ -139,29 +130,32 @@ pub fn register_vma_only(
     flags: PageTableFlags,
     kind: VmaKind,
 ) {
-    PROCESS_MANAGER.lock().register_vma_only(pid, start, size, flags, kind);
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+    let mut pm_guard = PROCESS_MANAGER.lock();
+    let proc = pm_guard.process_mut(pid);
+    let space = proc.address_space.as_mut().expect("Process has no address space");
+    
+    mm.register_vma(space, start, size, flags, kind);
 }
 
 /// Handle an in-bounds page fault safely (Demand Paging).
 pub fn demand_map_page(pid: PID, page_addr: VirtAddr, leaf_flags: PageTableFlags) {
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard.as_mut().expect("MM not initialised");
-    let off = mm.physical_memory_offset;
+    
+    let mut pm_guard = PROCESS_MANAGER.lock();
+    let proc = pm_guard.process_mut(pid);
+    let space = proc.address_space.as_mut().expect("Process has no address space");
 
-    PROCESS_MANAGER.lock().demand_map_page(
-        pid,
-        page_addr,
-        leaf_flags,
-        &mut mm.frame_allocator,
-        off,
-    );
+    mm.demand_map_page(space, page_addr, leaf_flags).expect("Demand map failed");
     drop(mm_guard);
+    drop(pm_guard);
 
     // Zero the freshly-mapped page so we don't leak kernel data.
     unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
 }
 
-/// Kill the current thread and yield to the scheduler.
 pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
     debugln!("Killing thread {:?}", tid);
     {

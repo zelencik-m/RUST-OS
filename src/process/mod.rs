@@ -1,3 +1,5 @@
+// src/process/mod.rs
+
 pub mod process_manager;
 pub mod thread;
 pub mod idle;
