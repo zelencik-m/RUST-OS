@@ -139,23 +139,6 @@ pub fn register_vma_only(
     mm.register_vma(space, start, size, flags, kind);
 }
 
-/// Handle an in-bounds page fault safely (Demand Paging).
-pub fn demand_map_page(pid: PID, page_addr: VirtAddr, leaf_flags: PageTableFlags) {
-    let mut mm_guard = MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MM not initialised");
-    
-    let mut pm_guard = PROCESS_MANAGER.lock();
-    let proc = pm_guard.process_mut(pid);
-    let space = proc.address_space.as_mut().expect("Process has no address space");
-
-    mm.demand_map_page(space, page_addr, leaf_flags).expect("Demand map failed");
-    drop(mm_guard);
-    drop(pm_guard);
-
-    // Zero the freshly-mapped page so we don't leak kernel data.
-    unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
-}
-
 pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
     debugln!("Killing thread {:?}", tid);
     {

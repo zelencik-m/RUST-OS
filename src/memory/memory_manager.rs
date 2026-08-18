@@ -16,6 +16,15 @@ use crate::sync::{IrqSafeMutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Oom;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultAction {
+    Resolved,
+    Segfault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageFaultError;
+
 pub struct MemoryManager {
     pub mapper: OffsetPageTable<'static>,
     pub frame_allocator: BootInfoFrameAllocator,
@@ -180,5 +189,31 @@ impl MemoryManager {
         }
         
         Ok(())
+    }
+
+    /// Handle a page fault for a specific address space.
+    /// Returns `FaultAction::Resolved` if the fault was handled (demand paged),
+    /// `FaultAction::Segfault` if the address is out of bounds,
+    /// or `PageFaultError` if an error occurred (e.g., OOM).
+    pub fn handle_page_fault(
+        &mut self,
+        space: &mut AddressSpace,
+        fault_addr: VirtAddr,
+    ) -> Result<FaultAction, PageFaultError> {
+        let page_addr = Page::<Size4KiB>::containing_address(fault_addr).start_address();
+        
+        if let Some(leaf_flags) = space.get_vma_flags(fault_addr) {
+            // In a VMA, demand map it
+            self.demand_map_page(space, page_addr, leaf_flags)
+                .map(|_| {
+                    // Zero the page to prevent data leaks
+                    unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
+                    FaultAction::Resolved
+                })
+                .map_err(|_| PageFaultError)
+        } else {
+            // Out of bounds
+            Ok(FaultAction::Segfault)
+        }
     }
 }
