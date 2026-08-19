@@ -50,6 +50,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let tid_exc = process_manager::create_thread(PID(0), ring3_exception_test);
         debugln!(">>> ring3_exception_test created TID({:?})", tid_exc.0);
 
+        debugln!(">>> creating elf_loader_test thread");
+        let tid_elf = process_manager::create_thread(PID(0), elf_loader_test);
+        debugln!(">>> elf_loader_test created TID({:?})", tid_elf.0);
+
         debugln!(">>> entering hlt_loop");
     });
     rust_os::hlt_loop();
@@ -310,5 +314,98 @@ extern "C" fn ring3_exception_test() -> ! {
             rip = in(reg) virt_addr.as_u64(),
             options(noreturn)
         );
+    }
+}
+
+// 1. Define a wrapper struct that forces 8-byte alignment
+#[repr(C, align(8))]
+struct AlignedBytes([u8; include_bytes!("../user.elf").len()]);
+
+// 2. Create the static aligned array
+static ALIGNED_ELF: AlignedBytes = AlignedBytes(*include_bytes!("../user.elf"));
+
+// 3. Create the slice pointing to the aligned data
+static USER_ELF: &[u8] = &ALIGNED_ELF.0;
+
+extern "C" fn elf_loader_test() -> ! {
+    use rust_os::memory::memory_manager::MEMORY_MANAGER;
+    use rust_os::process::process_manager::PROCESS_MANAGER;
+    use rust_os::memory::translate::translate_addr;
+    use x86_64::registers::control::Cr3;
+    use rust_os::process::process_manager::create_user_process;
+    use rust_os::scheduler::scheduler::yield_now;
+    use rust_os::println;
+
+    println!("[elf_loader_test] Creating user process...");
+    let upid = create_user_process("elf_test".into());
+    
+    let entry_point = {
+        let mut pm_guard = PROCESS_MANAGER.lock();
+        let proc = pm_guard.process_mut(upid);
+        let space = proc.address_space.as_mut().unwrap();
+        
+        let mut mm_guard = MEMORY_MANAGER.lock();
+        let mm = mm_guard.as_mut().unwrap();
+        
+        println!("[elf_loader_test] Calling load_elf...");
+        rust_os::process::elf_loader::load_elf(USER_ELF, space, mm).unwrap()
+    };
+
+    println!("[elf_loader_test] ✅ ELF loaded! Entry point: {:?}", entry_point);
+
+    // Switch CR3 to the new process so translate_addr can walk its page tables
+    let (current_cr3, cr3_flags) = Cr3::read();
+    let target_cr3 = {
+        let pm_guard = PROCESS_MANAGER.lock();
+        let proc = pm_guard.process(upid);
+        proc.address_space.as_ref().unwrap().cr3()
+    };
+
+    if current_cr3 != target_cr3 {
+        unsafe { Cr3::write(target_cr3, cr3_flags); }
+    }
+
+    let phys_mem_offset = {
+        let mm_guard = MEMORY_MANAGER.lock();
+        mm_guard.as_ref().unwrap().physical_memory_offset
+    };
+
+    // --- VERIFICATION TESTS ---
+
+    // 1. Verify .text segment at 0x400000 is mapped and NOT empty
+    let text_addr = x86_64::VirtAddr::new_truncate(0x400000);
+    let text_phys = unsafe { translate_addr(text_addr, phys_mem_offset) }.unwrap();
+    let text_ptr = (phys_mem_offset + text_phys.as_u64()).as_mut_ptr::<u8>();
+    
+    let mut text_bytes = [0u8; 4];
+    unsafe { core::ptr::copy_nonoverlapping(text_ptr, text_bytes.as_mut_ptr(), 4); }
+    
+    if text_bytes == [0, 0, 0, 0] {
+        println!("[elf_loader_test] ❌ FAIL: .text segment at 0x400000 is empty (not copied?)");
+    } else {
+        println!("[elf_loader_test] ✅ PASS: .text mapped. First bytes: {:x?}", text_bytes);
+    }
+
+    // 2. Verify .magic BSS segment at 0x403000 is mapped and ZEROED
+    let bss_addr = x86_64::VirtAddr::new_truncate(0x403000); // <-- Changed to 0x403000
+    let bss_phys = unsafe { translate_addr(bss_addr, phys_mem_offset) }.unwrap();
+    let bss_ptr = (phys_mem_offset + bss_phys.as_u64()).as_mut_ptr::<u64>();
+    
+    let mut bss_val = 0u64;
+    unsafe { core::ptr::copy_nonoverlapping(bss_ptr, &mut bss_val, 1); }
+    
+    if bss_val != 0 {
+        println!("[elf_loader_test] ❌ FAIL: .bss at 0x403000 not zeroed! Got {:#x}", bss_val);
+    } else {
+        println!("[elf_loader_test] ✅ PASS: .bss segment mapped and correctly zeroed.");
+    }
+
+    // Restore CR3
+    if current_cr3 != target_cr3 {
+        unsafe { Cr3::write(current_cr3, cr3_flags); }
+    }
+
+    loop {
+        yield_now();
     }
 }
