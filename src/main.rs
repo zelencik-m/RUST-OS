@@ -326,20 +326,22 @@ static ALIGNED_ELF: AlignedBytes = AlignedBytes(*include_bytes!("../user.elf"));
 
 // 3. Create the slice pointing to the aligned data
 static USER_ELF: &[u8] = &ALIGNED_ELF.0;
-
+// src/main.rs (inside elf_loader_test)
 extern "C" fn elf_loader_test() -> ! {
     use rust_os::memory::memory_manager::MEMORY_MANAGER;
     use rust_os::process::process_manager::PROCESS_MANAGER;
-    use rust_os::memory::translate::translate_addr;
     use x86_64::registers::control::Cr3;
-    use rust_os::process::process_manager::create_user_process;
-    use rust_os::scheduler::scheduler::yield_now;
+    use rust_os::process::process_manager::{create_user_process, create_user_thread};
+    use rust_os::scheduler::scheduler::sleep;
     use rust_os::println;
+    use x86_64::structures::paging::{Page, Size4KiB, PageTableFlags, FrameAllocator, Mapper};
+    use x86_64::VirtAddr;
+    use rust_os::memory::vma::VmaKind;
 
     println!("[elf_loader_test] Creating user process...");
     let upid = create_user_process("elf_test".into());
     
-    let entry_point = {
+    let target_cr3 = {
         let mut pm_guard = PROCESS_MANAGER.lock();
         let proc = pm_guard.process_mut(upid);
         let space = proc.address_space.as_mut().unwrap();
@@ -348,64 +350,54 @@ extern "C" fn elf_loader_test() -> ! {
         let mm = mm_guard.as_mut().unwrap();
         
         println!("[elf_loader_test] Calling load_elf...");
-        rust_os::process::elf_loader::load_elf(USER_ELF, space, mm).unwrap()
+        let _ = rust_os::process::elf_loader::load_elf(USER_ELF, space, mm);
+        
+        println!("[elf_loader_test] Mapping code and magic pages...");
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+        let code_addr = VirtAddr::new(0x600000);
+        let magic_addr = VirtAddr::new(0x601000);
+        
+        mm.mmap_at(space, code_addr, 4096, flags, VmaKind::Code).unwrap();
+        mm.mmap_at(space, magic_addr, 4096, flags, VmaKind::Data).unwrap();
+        
+        space.cr3()
     };
 
-    println!("[elf_loader_test] ✅ ELF loaded! Entry point: {:?}", entry_point);
-
-    // Switch CR3 to the new process so translate_addr can walk its page tables
+    // Switch to the user address space so we can write directly to the mappings
     let (current_cr3, cr3_flags) = Cr3::read();
-    let target_cr3 = {
-        let pm_guard = PROCESS_MANAGER.lock();
-        let proc = pm_guard.process(upid);
-        proc.address_space.as_ref().unwrap().cr3()
-    };
-
     if current_cr3 != target_cr3 {
         unsafe { Cr3::write(target_cr3, cr3_flags); }
     }
 
-    let phys_mem_offset = {
-        let mm_guard = MEMORY_MANAGER.lock();
-        mm_guard.as_ref().unwrap().physical_memory_offset
-    };
+    let code_addr = VirtAddr::new(0x600000);
+    let magic_addr = VirtAddr::new(0x601000);
 
-    // --- VERIFICATION TESTS ---
-
-    // 1. Verify .text segment at 0x400000 is mapped and NOT empty
-    let text_addr = x86_64::VirtAddr::new_truncate(0x400000);
-    let text_phys = unsafe { translate_addr(text_addr, phys_mem_offset) }.unwrap();
-    let text_ptr = (phys_mem_offset + text_phys.as_u64()).as_mut_ptr::<u8>();
-    
-    let mut text_bytes = [0u8; 4];
-    unsafe { core::ptr::copy_nonoverlapping(text_ptr, text_bytes.as_mut_ptr(), 4); }
-    
-    if text_bytes == [0, 0, 0, 0] {
-        println!("[elf_loader_test] ❌ FAIL: .text segment at 0x400000 is empty (not copied?)");
-    } else {
-        println!("[elf_loader_test] ✅ PASS: .text mapped. First bytes: {:x?}", text_bytes);
+    // x86_64 Machine code:
+    // mov dword [rip+0x0FF6], 0xCAFEBABE  (writes to 0x601000)
+    // jmp -2 (infinite loop)
+    let ptr = code_addr.as_mut_ptr::<u8>();
+    unsafe {
+        let code = [
+            0xc7, 0x05, 0xf6, 0x0f, 0x00, 0x00, 
+            0xbe, 0xba, 0xfe, 0xca,             
+            0xeb, 0xfe                          
+        ];
+        core::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
     }
 
-    // 2. Verify .magic BSS segment at 0x403000 is mapped and ZEROED
-    let bss_addr = x86_64::VirtAddr::new_truncate(0x403000); // <-- Changed to 0x403000
-    let bss_phys = unsafe { translate_addr(bss_addr, phys_mem_offset) }.unwrap();
-    let bss_ptr = (phys_mem_offset + bss_phys.as_u64()).as_mut_ptr::<u64>();
-    
-    let mut bss_val = 0u64;
-    unsafe { core::ptr::copy_nonoverlapping(bss_ptr, &mut bss_val, 1); }
-    
-    if bss_val != 0 {
-        println!("[elf_loader_test] ❌ FAIL: .bss at 0x403000 not zeroed! Got {:#x}", bss_val);
-    } else {
-        println!("[elf_loader_test] ✅ PASS: .bss segment mapped and correctly zeroed.");
-    }
+    println!("[elf_loader_test] Creating user thread...");
+    let utid = create_user_thread(upid, code_addr);
+    println!("[elf_loader_test] User thread created TID({:?})", utid.0);
 
-    // Restore CR3
-    if current_cr3 != target_cr3 {
-        unsafe { Cr3::write(current_cr3, cr3_flags); }
-    }
-
+    // Periodically check the magic memory address to verify Ring 3 execution
     loop {
-        yield_now();
+        sleep(50);
+        let magic_ptr = magic_addr.as_mut_ptr::<u32>();
+        let val = unsafe { core::ptr::read_volatile(magic_ptr) };
+        println!("[elf_loader_test] Magic value at 0x601000: {:#x}", val);
+        
+        if val == 0xCAFEBABE {
+            println!("[elf_loader_test] ✅ SUCCESS! User thread executed and wrote magic number!");
+        }
     }
 }

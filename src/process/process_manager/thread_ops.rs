@@ -2,6 +2,7 @@
 
 use alloc::boxed::Box;
 use x86_64::registers::control::Cr3;
+use x86_64::VirtAddr;
 
 use crate::process::thread::{TID, Thread, ThreadState};
 use crate::process::PID;
@@ -30,6 +31,38 @@ impl ProcessManager {
                     }
                 }
             }
+        }
+
+        self.process_mut(pid).threads.push(tid);
+        tid
+    }
+
+    pub fn create_user_thread_locked(&mut self, pid: PID, entry_point: VirtAddr) -> TID {
+        let tid = if let Some(free_tid) = self.free_tids.pop() {
+            free_tid
+        } else {
+            TID(self.threads.len() as u64)
+        };
+
+        let proc = self.process_mut(pid);
+        let user_stack_top = if let Some(space) = proc.address_space.as_mut() {
+            let mut mm_guard = MEMORY_MANAGER.lock();
+            if let Some(mm) = mm_guard.as_mut() {
+                mm.allocate_user_stack(space).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let user_stack = user_stack_top.expect("Failed to allocate user stack for user thread");
+        let thread = Box::new(Thread::new_user(tid, pid, 4096 * 4, entry_point, user_stack));
+
+        if (tid.0 as usize) < self.threads.len() {
+            self.threads[tid.0 as usize] = Some(thread);
+        } else {
+            self.threads.push(Some(thread));
         }
 
         self.process_mut(pid).threads.push(tid);

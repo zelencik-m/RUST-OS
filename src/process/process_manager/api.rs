@@ -55,6 +55,15 @@ pub fn create_idle_thread(entry: extern "C" fn() -> !) -> TID {
     tid
 }
 
+pub fn create_user_thread(pid: PID, entry_point: VirtAddr) -> TID {
+    let mut scheduler = SCHEDULER.lock();
+    let mut pm = PROCESS_MANAGER.lock();
+    let tid = pm.create_user_thread_locked(pid, entry_point);
+    drop(pm);
+    scheduler.add_runnable(tid);
+    tid
+}
+
 pub fn switch_to(tid: TID) {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
@@ -68,18 +77,21 @@ pub fn switch_to(tid: TID) {
         .unwrap_or(true);
 
     if changing {
-        debugln!("Changing");
         if let Some(space) = &pm.process(new_owner).address_space {
             let (_, flags) = Cr3::read();
             unsafe { Cr3::write(space.cr3(), flags); }
-            debugln!("[CR3 switch] to PID {}", new_owner.0);
         } else {
             let mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
             let mm = mm_guard.as_ref().expect("MM init");
             let (_, flags) = Cr3::read();
             unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
-            debugln!("[CR3 switch] to Kernel");
         }
+    }
+
+    // Set TSS RSP0 if switching to a user thread
+    let new_thread = pm.thread(tid);
+    if new_thread.is_user {
+        unsafe {crate::interrupts::gdt::set_tss_rsp0(new_thread.kernel_stack_top);};
     }
 
     let (old_ctx, new_ctx) = pm.commit_switch(&mut *scheduler, tid);
@@ -88,7 +100,6 @@ pub fn switch_to(tid: TID) {
 
     unsafe { thread::switch_context(old_ctx, new_ctx); }
 }
-
 pub fn destroy_process(pid: PID) {
     let tids: Vec<TID> = {
         let pm = PROCESS_MANAGER.lock();

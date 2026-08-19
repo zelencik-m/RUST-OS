@@ -4,6 +4,7 @@ pub mod process_manager;
 pub mod thread;
 pub mod idle;
 pub mod elf_loader;
+pub mod usermode;
 
 use alloc::rc::{Rc, Weak};
 use alloc::string::{String, ToString};
