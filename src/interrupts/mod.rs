@@ -62,6 +62,9 @@ lazy_static! {
 
         idt.page_fault.set_handler_fn(page_fault_handler);
 
+        idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
+
+
         idt
     };
 }
@@ -231,3 +234,31 @@ impl InterruptIndex {
     }
 }
 
+extern "x86-interrupt" fn general_protection_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    // Check the Code Segment (CS) register to see what Ring we were in.
+    // The bottom 2 bits of CS represent the Requested Privilege Level (RPL).
+    let cs = stack_frame.code_segment;
+    
+    if cs & 0x3 == 3 {
+        // We are in Ring 3 (User Mode)! The user program did something illegal.
+        let tid = SCHEDULER.lock().get_current().expect("No current thread during #GP");
+        let owner = PROCESS_MANAGER.lock().thread(tid).get_owner();
+        
+        println!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
+        println!("  Killing PID({}), TID({:?})", owner.0, tid);
+        println!("  Error Code: {:#x}", error_code);
+        println!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
+        
+        // Kill the thread and seamlessly switch to the next one
+        crate::process::process_manager::kill_current_thread_and_schedule(tid);
+    } else {
+        // We are in Ring 0 (Kernel Mode)! The kernel did something wrong. This is fatal.
+        panic!(
+            "\n!!! KERNEL EXCEPTION: GENERAL PROTECTION FAULT (#GP) !!!\n  Error Code: {:#x}\n  Stack Frame:\n{:#?}", 
+            error_code, stack_frame
+        );
+    }
+}

@@ -46,12 +46,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let tid_c = process_manager::create_thread(upid, thread_c);
         debugln!(">>> thread_c created TID({:?})", tid_c.0);
 
-        // Spawn the verification thread under the Kernel Process (PID 0)
-        debugln!(">>> creating ring3_test thread");
-        let tid_ring3 = process_manager::create_thread(PID(0), ring3_test);
-        debugln!(">>> ring3_test created TID({:?})", tid_ring3.0);
+        debugln!(">>> creating ring3_exception_test thread");
+        let tid_exc = process_manager::create_thread(PID(0), ring3_exception_test);
+        debugln!(">>> ring3_exception_test created TID({:?})", tid_exc.0);
 
-        debugln!(">>> entering hlt_loop (scheduler will take over via timer interrupts)");
+        debugln!(">>> entering hlt_loop");
     });
     rust_os::hlt_loop();
 }
@@ -214,5 +213,102 @@ extern "C" fn thread_c() -> ! {
             }
         }
         sleep(10);
+    }
+}
+
+extern "C" fn ring3_exception_test() -> ! {
+    use rust_os::memory::memory_manager::MEMORY_MANAGER;
+    use rust_os::interrupts::gdt::{get_selectors, set_tss_rsp0};
+    use x86_64::structures::paging::{Mapper, Page, Size4KiB, PageTableFlags};
+    use x86_64::VirtAddr;
+    use core::arch::asm;
+    use x86_64::structures::paging::FrameAllocator;
+
+    debugln!("[ring3_exception_test] starting...");
+
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().unwrap();
+
+    // Map a single user-accessible page
+    let virt_addr = VirtAddr::new(0x0000_1000_0000_0000);
+    let page = Page::<Size4KiB>::containing_address(virt_addr);
+    let frame = mm.frame_allocator.allocate_frame().expect("frame alloc failed");
+
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+    unsafe {
+        mm.mapper
+            .map_to_with_table_flags(page, frame, flags, parent_flags, &mut mm.frame_allocator)
+            .expect("map failed")
+            .flush();
+    }
+
+    let ptr = virt_addr.as_mut_ptr::<u8>();
+    unsafe {
+        // =========================================================
+        // CHOOSE YOUR EXCEPTION BY UNCOMMENTING ONE OF THE OPTIONS
+        // =========================================================
+
+        // OPTION 1: Breakpoint Exception (#BP) - RECOVERABLE
+        // Triggers `int 3`. Your handler will print the stack frame 
+        // and return to Ring 3. We use `jmp +1` to skip the `nop` 
+        // so it only traps ONCE, then enters an infinite loop.
+        /*
+        *ptr.offset(0) = 0xCC; // int 3
+        *ptr.offset(1) = 0xEB; // jmp rel8 +1
+        *ptr.offset(2) = 0x01; // (skip 1 byte)
+        *ptr.offset(3) = 0x90; // nop (skipped)
+        *ptr.offset(4) = 0xEB; // jmp -2 (infinite loop)
+        *ptr.offset(5) = 0xFE; 
+        */
+
+        // OPTION 2: Page Fault (#PF) - FATAL
+        // Loads 0x0000_0000_2000_0000 into RAX (Canonical, but unmapped!)
+        *ptr.offset(0) = 0x48; *ptr.offset(1) = 0xB8; // mov rax, imm64
+        *ptr.offset(2) = 0x00; *ptr.offset(3) = 0x00; *ptr.offset(4) = 0x00; *ptr.offset(5) = 0x20;
+        *ptr.offset(6) = 0x00; *ptr.offset(7) = 0x00; *ptr.offset(8) = 0x00; *ptr.offset(9) = 0x00; 
+        *ptr.offset(10) = 0x48; *ptr.offset(11) = 0x89; *ptr.offset(12) = 0x00; // mov [rax], rax -> TRAPS HERE with #PF!
+        *ptr.offset(13) = 0xEB; *ptr.offset(14) = 0xFE; // jmp -2 (fallback)
+
+        // OPTION 3: General Protection Fault (#GP) or Invalid Opcode (#UD)
+        // WARNING: You don't have IDT handlers for these yet! 
+        // They will trigger a Double Fault and panic the kernel.
+        // *ptr.offset(0) = 0xF4;       // hlt (Privileged -> #GP)
+        // *ptr.offset(0) = 0x0F; *ptr.offset(1) = 0x0B; // ud2 (Invalid Opcode -> #UD)
+    }
+
+    let selectors = get_selectors();
+    let cs = selectors.user_code_selector.0 as u64 | 3;
+    let ss = selectors.user_data_selector.0 as u64 | 3;
+    let user_rsp = virt_addr.as_u64() + 4096;
+
+    // Save current kernel RSP into TSS RSP0 so the CPU knows where to 
+    // switch stacks when the Ring 3 exception occurs.
+    let mut current_rsp: u64;
+    unsafe { asm!("mov {}, rsp", out(reg) current_rsp); }
+    unsafe { set_tss_rsp0(VirtAddr::new(current_rsp)); }
+
+    drop(mm_guard);
+
+    // Jump to Ring 3
+    unsafe {
+        asm!(
+            "mov ds, {ds:e}",
+            "mov es, {ds:e}",
+            "push {ss}",
+            "push {rsp}",
+            "push {rflags}",
+            "push {cs}",
+            "push {rip}",
+            "iretq",
+            ds = in(reg) ss,
+            ss = in(reg) ss,
+            rsp = in(reg) user_rsp,
+            rflags = in(reg) 0x202u64,
+            cs = in(reg) cs,
+            rip = in(reg) virt_addr.as_u64(),
+            options(noreturn)
+        );
     }
 }
