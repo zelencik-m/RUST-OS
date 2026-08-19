@@ -49,8 +49,13 @@ lazy_static! {
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
 
-        idt[InterruptIndex::Timer.as_usize()]
-            .set_handler_fn(timer_interrupt_handler);
+        // 3. Update IDT to point to the naked wrapper
+        unsafe {
+            idt[InterruptIndex::Timer.as_usize()]
+                .set_handler_fn(core::mem::transmute::<*const (), extern "x86-interrupt" fn(InterruptStackFrame)>(
+                    timer_interrupt_wrapper as *const ()
+                ));
+        }
 
         idt[InterruptIndex::Keyboard.as_usize()]
             .set_handler_fn(keyboard_interrupt_handler);
@@ -58,8 +63,6 @@ lazy_static! {
         idt.page_fault.set_handler_fn(page_fault_handler);
 
         idt
-
-
     };
 }
 
@@ -152,7 +155,50 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     }
 }
 
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+// Add this import at the top of the file if not already present
+use core::arch::global_asm;
+
+// 1. Naked Wrapper
+global_asm!(
+    ".global timer_interrupt_wrapper",
+    "timer_interrupt_wrapper:",
+    "cld",              // Ensure direction flag is clear for System V ABI
+    "sub rsp, 128",     // Skip the 128-byte red zone to avoid corrupting leaf-function data
+    // Push all caller-saved registers to preserve them across the context switch
+    "push rax",
+    "push rcx",
+    "push rdx",
+    "push rsi",
+    "push rdi",
+    "push r8",
+    "push r9",
+    "push r10",
+    "push r11",
+    
+    // Call the Rust handler
+    "call timer_interrupt_rust_handler",
+    
+    // Pop caller-saved registers (restores the new thread's state)
+    "pop r11",
+    "pop r10",
+    "pop r9",
+    "pop r8",
+    "pop rdi",
+    "pop rsi",
+    "pop rdx",
+    "pop rcx",
+    "pop rax",
+    "add rsp, 128",     // Restore red zone skip
+    "iretq"             // Return from interrupt (consumes the CPU-pushed frame)
+);
+
+extern "C" {
+    fn timer_interrupt_wrapper();
+}
+
+// 2. Rust Handler
+#[no_mangle]
+extern "C" fn timer_interrupt_rust_handler() {
     let should_switch = SCHEDULER.lock().tick(); // lock dropped immediately
 
     unsafe {
@@ -163,7 +209,6 @@ extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFr
         yield_now(); // safe now: PIC EOI already sent, lock already released
     }
 }
-
 extern "x86-interrupt" fn breakpoint_handler(
     stack_frame: InterruptStackFrame)
 {
