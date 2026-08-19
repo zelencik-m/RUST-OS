@@ -169,3 +169,20 @@ pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, crate::memory:
     
     mm.sys_brk(space, new_break)
 }
+
+pub fn demand_map_page(
+    pid: PID, 
+    page_addr: VirtAddr, 
+    leaf_flags: PageTableFlags
+) -> Result<(), crate::memory::memory_manager::Oom> {
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+    let mut pm_guard = PROCESS_MANAGER.lock();
+    let proc = pm_guard.process_mut(pid);
+    let space = proc.address_space.as_mut().expect("Process has no address space");
+    
+    mm.demand_map_page(space, page_addr, leaf_flags).map(|_| {
+        // Zero the newly mapped page
+        unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
+    })
+}

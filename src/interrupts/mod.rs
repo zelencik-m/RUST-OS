@@ -67,16 +67,18 @@ pub fn init_idt() {
     IDT.load();
 }
 
+// src/interrupts/mod.rs
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     use x86_64::registers::control::Cr2;
-    use crate::memory::memory_manager::{FaultAction, MEMORY_MANAGER};
+    use x86_64::structures::paging::{Page, Size4KiB};
 
     let fault_addr = Cr2::read();
+    let page_addr  = Page::<Size4KiB>::containing_address(fault_addr).start_address();
 
-    // 1. Who faulted? Drop the scheduler lock immediately.
+    // 1. Who faulted?
     let tid = match SCHEDULER.lock().get_current() {
         Some(t) => t,
         None => panic!(
@@ -85,44 +87,37 @@ extern "x86-interrupt" fn page_fault_handler(
         ),
     };
 
-    // 2. Lock PROCESS_MANAGER first, then MEMORY_MANAGER to strictly enforce lock order
-    // and completely eliminate deadlock risks.
-    let action = {
-        let mut pm = PROCESS_MANAGER.lock();
+    // 2. Ask ProcessManager for the full VMA
+    let (owner, vma) = {
+        let pm = PROCESS_MANAGER.lock();
         let owner = pm.thread(tid).get_owner();
-        
-        let proc = pm.process_mut(owner);
-        let space = match proc.address_space.as_mut() {
-            Some(s) => s,
-            None => {
-                // Kernel page fault!
-                panic!(
-                    "KERNEL PAGE FAULT\n  addr: {:?}\n  err:  {:?}\n{:#?}",
-                    fault_addr, error_code, stack_frame
-                );
-            }
-        };
-
-        let mut mm_guard = MEMORY_MANAGER.lock();
-        let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
-        
-        mm.handle_page_fault(space, fault_addr)
-    };
+        let vma = pm.get_vma(owner, fault_addr);
+        (owner, vma)
+    }; // pm lock is dropped here to prevent deadlocks when demanding pages
 
     // 3. Act on the answer
-    match action {
-        Ok(FaultAction::Resolved) => {
-            // return -> iretq retries the faulting instruction
+    match vma {
+        Some(vma) => {
+            // Catch stack overflows hitting the guard page
+            if vma.kind == crate::memory::vma::VmaKind::Guard {
+                println!("PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})", owner.0, tid);
+                crate::process::process_manager::kill_current_thread_and_schedule(tid);
+                return;
+            }
+
+            match crate::process::process_manager::demand_map_page(owner, page_addr, vma.flags) {
+                Ok(()) => {
+                    // return → iretq retries the faulting instruction
+                }
+                Err(_) => {
+                    println!("PAGE FAULT: OOM while mapping PID({}), TID({:?})", owner.0, tid);
+                    println!("  faulting addr: {:?}", fault_addr);
+                    crate::process::process_manager::kill_current_thread_and_schedule(tid);
+                }
+            }
         }
-        Ok(FaultAction::Segfault) => {
-            println!("PAGE FAULT: killing TID({:?})", tid);
-            println!("  faulting addr: {:?}", fault_addr);
-            println!("  error code:    {:?}", error_code);
-            println!("{:#?}", stack_frame);
-            crate::process::process_manager::kill_current_thread_and_schedule(tid);
-        }
-        Err(_) => {
-            println!("PAGE FAULT: OOM while mapping TID({:?})", tid);
+        None => {
+            println!("PAGE FAULT: killing PID({}), TID({:?})", owner.0, tid);
             println!("  faulting addr: {:?}", fault_addr);
             println!("  error code:    {:?}", error_code);
             println!("{:#?}", stack_frame);

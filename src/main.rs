@@ -23,7 +23,9 @@ use x86_64::instructions::interrupts;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 use rust_os::memory::vma::VmaKind; // Make sure this path matches your VmaKind import
+use rust_os::process::PID;
 
+// src/main.rs (inside `kernel_main`)
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rust_os::init(boot_info);
 
@@ -44,11 +46,83 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let tid_c = process_manager::create_thread(upid, thread_c);
         debugln!(">>> thread_c created TID({:?})", tid_c.0);
 
+        // Spawn the verification thread under the Kernel Process (PID 0)
+        debugln!(">>> creating ring3_test thread");
+        let tid_ring3 = process_manager::create_thread(PID(0), ring3_test);
+        debugln!(">>> ring3_test created TID({:?})", tid_ring3.0);
+
         debugln!(">>> entering hlt_loop (scheduler will take over via timer interrupts)");
     });
     rust_os::hlt_loop();
 }
 
+extern "C" fn ring3_test() -> ! {
+    use rust_os::memory::memory_manager::MEMORY_MANAGER;
+    use rust_os::interrupts::gdt::{get_selectors, set_tss_rsp0};
+    use x86_64::structures::paging::{Mapper, Page, Size4KiB, PageTableFlags};
+    use x86_64::VirtAddr;
+    use core::arch::asm;
+    use x86_64::structures::paging::FrameAllocator;
+
+    debugln!("[ring3_test] starting...");
+
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().unwrap();
+
+    // 16 TB -> P4 index 32, a slot the bootloader never touched, so
+    // map_to_with_table_flags creates ALL levels fresh with USER_ACCESSIBLE.
+    let virt_addr = VirtAddr::new(0x0000_1000_0000_0000);
+    let page = Page::<Size4KiB>::containing_address(virt_addr);
+    let frame = mm.frame_allocator.allocate_frame().expect("frame alloc failed");
+
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+    let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
+
+    unsafe {
+        mm.mapper
+            .map_to_with_table_flags(page, frame, flags, parent_flags, &mut mm.frame_allocator)
+            .expect("map failed")
+            .flush();
+    }
+
+    // Infinite loop: jmp -2
+    let ptr = virt_addr.as_mut_ptr::<u8>();
+    unsafe {
+        *ptr.offset(0) = 0xEB;
+        *ptr.offset(1) = 0xFE;
+    }
+
+    let selectors = get_selectors();
+    let cs = selectors.user_code_selector.0 as u64 | 3;
+    let ss = selectors.user_data_selector.0 as u64 | 3;
+    let user_rsp = virt_addr.as_u64() + 4096;
+
+    let mut current_rsp: u64;
+    unsafe { asm!("mov {}, rsp", out(reg) current_rsp); }
+    unsafe { set_tss_rsp0(VirtAddr::new(current_rsp)); }
+
+    drop(mm_guard); // never hold locks into Ring 3
+
+    unsafe {
+        asm!(
+            "mov ds, {ds:e}",
+            "mov es, {ds:e}",
+            "push {ss}",
+            "push {rsp}",
+            "push {rflags}",
+            "push {cs}",
+            "push {rip}",
+            "iretq",
+            ds = in(reg) ss,
+            ss = in(reg) ss,
+            rsp = in(reg) user_rsp,
+            rflags = in(reg) 0x202u64,
+            cs = in(reg) cs,
+            rip = in(reg) virt_addr.as_u64(),
+            options(noreturn)
+        );
+    }
+}
 /// This function is called on panic.
 #[cfg(not(test))]
 #[panic_handler]
@@ -107,27 +181,27 @@ extern "C" fn thread_b() -> ! {
     let mut counter: u64 = 100000000;
     let mut subtracting = true;
     loop {
-        println!("executing thread B (counter={})", counter);
-        loop{
+        // println!("executing thread B (counter={})", counter);
+        loop {
             if subtracting {
-                counter -= 1;
+                if counter == 0 {
+                    subtracting = false;
+                    counter += 1;
+                } else {
+                    counter -= 1;
+                }
             } else {
                 counter += 1;
+                if counter == 100000000 {
+                    subtracting = true;
+                }
             }
-            if counter == 0 {
-                subtracting = false;
-            } else if counter == 100000000 {
-                subtracting = true;
-            }
-            counter -= 1;
             if counter % 100 == 0 {
                 break;
             }
         }
-        // sleep(100);
     }
 }
-
 extern "C" fn thread_c() -> ! {
     let mut counter: u64 = 0;
     loop {

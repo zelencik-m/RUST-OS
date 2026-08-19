@@ -44,6 +44,14 @@ pub fn init(boot_info: &'static BootInfo) {
     gdt::init();
     interrupts::init_idt();
     unsafe { interrupts::PICS.lock().initialize() };
+    unsafe {
+        use x86_64::registers::control::Efer;
+        use x86_64::registers::control::EferFlags;
+        let mut efer = Efer::read();
+        efer.insert(EferFlags::NO_EXECUTE_ENABLE);
+        Efer::write(efer);
+    }
+
     debugln!("{:?}", boot_info.physical_memory_offset);
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
