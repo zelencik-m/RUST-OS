@@ -184,7 +184,7 @@ extern "C" fn thread_b() -> ! {
     let mut counter: u64 = 100000000;
     let mut subtracting = true;
     loop {
-        // println!("executing thread B (counter={})", counter);
+        println!("executing thread B (counter={})", counter);
         loop {
             if subtracting {
                 if counter == 0 {
@@ -203,6 +203,7 @@ extern "C" fn thread_b() -> ! {
                 break;
             }
         }
+        sleep(3);
     }
 }
 extern "C" fn thread_c() -> ! {
@@ -394,10 +395,10 @@ extern "C" fn elf_loader_test() -> ! {
         sleep(50);
         let magic_ptr = magic_addr.as_mut_ptr::<u32>();
         let val = unsafe { core::ptr::read_volatile(magic_ptr) };
-        println!("[elf_loader_test] Magic value at 0x601000: {:#x}", val);
+        debugln!("[elf_loader_test] Magic value at 0x601000: {:#x}", val);
         
         if val == 0xCAFEBABE {
-            println!("[elf_loader_test] ✅ SUCCESS! User thread executed and wrote magic number!");
+            debugln!("[elf_loader_test] ✅ SUCCESS! User thread executed and wrote magic number!");
         }
     }
 }
