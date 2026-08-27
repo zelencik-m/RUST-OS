@@ -14,8 +14,8 @@ pub mod bump;
 pub mod fixed_size_block;
 pub mod buddy_allocator;
 
-pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 10 * 1024*1024;
+pub const HEAP_START: usize = 0xFFFF_9000_0000_0000;
+pub const HEAP_SIZE: usize = 10 * 1024 * 1024;
 
 #[global_allocator]
 // static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(FixedSizeBlockAllocator::new());

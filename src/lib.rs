@@ -56,8 +56,13 @@ pub fn init(boot_info: &'static BootInfo) {
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
-    mm.init_heap().expect("heap initialization failed");
 
+    crate::vga_buffer::KERNEL_CR3_PHYS.store(
+        mm.kernel_p4_frame.start_address().as_u64(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+
+    mm.init_heap().expect("heap initialization failed");
     *MEMORY_MANAGER.lock() = Some(mm);
     // unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
 

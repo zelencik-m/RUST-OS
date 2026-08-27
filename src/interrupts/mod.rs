@@ -11,7 +11,7 @@ use spin;
 use x86_64::structures::idt::PageFaultErrorCode;
 
 use crate::hlt_loop;
-use crate::println;
+use crate::serial_println;
 use crate::print;
 use crate::scheduler::scheduler::schedule;
 use crate::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now};
@@ -106,7 +106,7 @@ extern "x86-interrupt" fn page_fault_handler(
         Some(vma) => {
             // Catch stack overflows hitting the guard page
             if vma.kind == crate::memory::vma::VmaKind::Guard {
-                println!("PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})", owner.0, tid);
+                serial_println!("PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})", owner.0, tid);
                 crate::process::process_manager::kill_current_thread_and_schedule(tid);
                 return;
             }
@@ -116,17 +116,17 @@ extern "x86-interrupt" fn page_fault_handler(
                     // return → iretq retries the faulting instruction
                 }
                 Err(_) => {
-                    println!("PAGE FAULT: OOM while mapping PID({}), TID({:?})", owner.0, tid);
-                    println!("  faulting addr: {:?}", fault_addr);
+                    serial_println!("PAGE FAULT: OOM while mapping PID({}), TID({:?})", owner.0, tid);
+                    serial_println!("  faulting addr: {:?}", fault_addr);
                     crate::process::process_manager::kill_current_thread_and_schedule(tid);
                 }
             }
         }
         None => {
-            println!("PAGE FAULT: killing PID({}), TID({:?})", owner.0, tid);
-            println!("  faulting addr: {:?}", fault_addr);
-            println!("  error code:    {:?}", error_code);
-            println!("{:#?}", stack_frame);
+            serial_println!("PAGE FAULT: killing PID({}), TID({:?})", owner.0, tid);
+            serial_println!("  faulting addr: {:?}", fault_addr);
+            serial_println!("  error code:    {:?}", error_code);
+            serial_println!("{:#?}", stack_frame);
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
     }
@@ -215,7 +215,7 @@ extern "C" fn timer_interrupt_rust_handler() {
 extern "x86-interrupt" fn breakpoint_handler(
     stack_frame: InterruptStackFrame)
 {
-    println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
+    serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -247,10 +247,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         let tid = SCHEDULER.lock().get_current().expect("No current thread during #GP");
         let owner = PROCESS_MANAGER.lock().thread(tid).get_owner();
         
-        println!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
-        println!("  Killing PID({}), TID({:?})", owner.0, tid);
-        println!("  Error Code: {:#x}", error_code);
-        println!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
+        serial_println!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
+        serial_println!("  Killing PID({}), TID({:?})", owner.0, tid);
+        serial_println!("  Error Code: {:#x}", error_code);
+        serial_println!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
         
         // Kill the thread and seamlessly switch to the next one
         crate::process::process_manager::kill_current_thread_and_schedule(tid);

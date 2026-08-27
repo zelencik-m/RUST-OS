@@ -7,7 +7,7 @@
 #![reexport_test_harness_main = "test_main"]
 
 use core::panic::PanicInfo;
-use rust_os::{hlt_loop, print, println, debugln};
+use rust_os::{hlt_loop, print, serial_println, debugln};
 
 use bootloader::{BootInfo, entry_point};
 
@@ -126,11 +126,13 @@ extern "C" fn ring3_test() -> ! {
         );
     }
 }
-/// This function is called on panic.
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!("{}", info);
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        serial_println!("{}", info);
+    });
     hlt_loop();
 }
 
@@ -145,36 +147,40 @@ extern "C" fn thread_a() -> ! {
 
     debugln!("[thread_a] starting demand paging checkpoint...");
 
-    // 1. Get current TID and PID
     let tid = SCHEDULER.lock().get_current().expect("no current thread");
     let pid = PROCESS_MANAGER.lock().thread(tid).get_owner();
 
-    // 2. Register a VMA without mapping it
-    let test_addr = VirtAddr::new(0x1000_0000);
+    let test_addr =
+        VirtAddr::new(rust_os::memory::address_space::USER_SPACE_START);
+
     process_manager::register_vma_only(
         pid,
         test_addr,
         4096,
         PageTableFlags::PRESENT | PageTableFlags::WRITABLE,
-        VmaKind::User, // Make sure your enum has a User variant, or change as needed
+        VmaKind::User,
     );
 
-    // 3. In-bounds access: should trigger #PF, get demand-mapped, and succeed
     unsafe {
         let p = test_addr.as_mut_ptr::<u64>();
-        *p = 0xCAFEBABE; // Traps here, handler maps page, returns, and executes store again
+        *p = 0xCAFEBABE;
         assert_eq!(*p, 0xCAFEBABE);
     }
+
     debugln!("[thread_a] in-bounds demand paging test passed!");
 
-    // 4. Out-of-bounds access: should trigger #PF and kill this process
+    // Unmapped, but still inside the private user P4 slot.
+    let bad_addr = VirtAddr::new(
+        rust_os::memory::address_space::USER_SPACE_START + 0x1000_000,
+    );
+
     unsafe {
-        let p = VirtAddr::new(0xDEAD_BEEF_0000).as_mut_ptr::<u64>();
-        *p = 1; // Traps here, handler detects out-of-bounds, kills process
+        let p = bad_addr.as_mut_ptr::<u64>();
+        *p = 1;
     }
-    
+
     debugln!("[thread_a] this line should never print");
-    
+
     loop {
         yield_now();
     }
@@ -184,7 +190,7 @@ extern "C" fn thread_b() -> ! {
     let mut counter: u64 = 100000000;
     let mut subtracting = true;
     loop {
-        println!("executing thread B (counter={})", counter);
+        serial_println!("executing thread B (counter={})", counter);
         loop {
             if subtracting {
                 if counter == 0 {
@@ -209,9 +215,9 @@ extern "C" fn thread_b() -> ! {
 extern "C" fn thread_c() -> ! {
     let mut counter: u64 = 0;
     loop {
-        println!("executing thread C (counter={})", counter);
+        serial_println!("executing thread C (counter={})", counter);
         loop{
-            // println!("thread A (counter={})", counter);
+            // serial_println!("thread A (counter={})", counter);
             counter += 1;
             if counter % 100 == 0 {
                 break;
@@ -334,71 +340,101 @@ extern "C" fn elf_loader_test() -> ! {
     use x86_64::registers::control::Cr3;
     use rust_os::process::process_manager::{create_user_process, create_user_thread};
     use rust_os::scheduler::scheduler::sleep;
-    use rust_os::println;
+    use rust_os::serial_println;
     use x86_64::structures::paging::{Page, Size4KiB, PageTableFlags, FrameAllocator, Mapper};
     use x86_64::VirtAddr;
     use rust_os::memory::vma::VmaKind;
 
-    println!("[elf_loader_test] Creating user process...");
+    serial_println!("[elf_loader_test] Creating user process...");
+
     let upid = create_user_process("elf_test".into());
-    
+
+    let user_base = rust_os::memory::address_space::USER_SPACE_START + 0x100000;
+
     let target_cr3 = {
         let mut pm_guard = PROCESS_MANAGER.lock();
         let proc = pm_guard.process_mut(upid);
         let space = proc.address_space.as_mut().unwrap();
-        
+
         let mut mm_guard = MEMORY_MANAGER.lock();
         let mm = mm_guard.as_mut().unwrap();
-        
-        println!("[elf_loader_test] Calling load_elf...");
-        let _ = rust_os::process::elf_loader::load_elf(USER_ELF, space, mm);
-        
-        println!("[elf_loader_test] Mapping code and magic pages...");
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
-        let code_addr = VirtAddr::new(0x600000);
-        let magic_addr = VirtAddr::new(0x601000);
-        
+
+        // TEMP:
+        // Your user.elf is probably linked at low addresses.
+        // Until you relink it into USER_SPACE_START range, do not load it.
+        //
+        // let _ = rust_os::process::elf_loader::load_elf(USER_ELF, space, mm);
+
+        serial_println!("[elf_loader_test] Mapping code and magic pages...");
+
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE;
+
+        let code_addr = VirtAddr::new(user_base);
+        let magic_addr = VirtAddr::new(user_base + 0x1000);
+
         mm.mmap_at(space, code_addr, 4096, flags, VmaKind::Code).unwrap();
         mm.mmap_at(space, magic_addr, 4096, flags, VmaKind::Data).unwrap();
-        
+
         space.cr3()
     };
 
-    // Switch to the user address space so we can write directly to the mappings
+    let code_addr = VirtAddr::new(user_base);
+    let magic_addr = VirtAddr::new(user_base + 0x1000);
+
+    // Switch to the user address space so we can write directly to the mappings.
     let (current_cr3, cr3_flags) = Cr3::read();
+
     if current_cr3 != target_cr3 {
-        unsafe { Cr3::write(target_cr3, cr3_flags); }
+        unsafe {
+            Cr3::write(target_cr3, cr3_flags);
+        }
     }
 
-    let code_addr = VirtAddr::new(0x600000);
-    let magic_addr = VirtAddr::new(0x601000);
-
-    // x86_64 Machine code:
-    // mov dword [rip+0x0FF6], 0xCAFEBABE  (writes to 0x601000)
-    // jmp -2 (infinite loop)
     let ptr = code_addr.as_mut_ptr::<u8>();
+
     unsafe {
         let code = [
-            0xc7, 0x05, 0xf6, 0x0f, 0x00, 0x00, 
-            0xbe, 0xba, 0xfe, 0xca,             
-            0xeb, 0xfe                          
+            0xc7, 0x05, 0xf6, 0x0f, 0x00, 0x00,
+            0xbe, 0xba, 0xfe, 0xca,
+            0xeb, 0xfe,
         ];
+
         core::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
     }
 
-    println!("[elf_loader_test] Creating user thread...");
-    let utid = create_user_thread(upid, code_addr);
-    println!("[elf_loader_test] User thread created TID({:?})", utid.0);
+    // Restore kernel CR3 before continuing.
+    unsafe {
+        Cr3::write(current_cr3, cr3_flags);
+    }
 
-    // Periodically check the magic memory address to verify Ring 3 execution
+    serial_println!("[elf_loader_test] Creating user thread...");
+
+    let utid = create_user_thread(upid, code_addr);
+
+    serial_println!("[elf_loader_test] User thread created TID({:?})", utid.0);
+
     loop {
         sleep(50);
+
+        let (cur_cr3, flags) = Cr3::read();
+
+        unsafe {
+            Cr3::write(target_cr3, flags);
+        }
+
         let magic_ptr = magic_addr.as_mut_ptr::<u32>();
         let val = unsafe { core::ptr::read_volatile(magic_ptr) };
-        debugln!("[elf_loader_test] Magic value at 0x601000: {:#x}", val);
-        
+
+        unsafe {
+            Cr3::write(cur_cr3, flags);
+        }
+
+        debugln!("[elf_loader_test] Magic value at {:#x}: {:#x}", magic_addr.as_u64(), val);
+
         if val == 0xCAFEBABE {
-            debugln!("[elf_loader_test] ✅ SUCCESS! User thread executed and wrote magic number!");
+            debugln!("[elf_loader_test] SUCCESS! User thread executed and wrote magic number!");
         }
     }
 }

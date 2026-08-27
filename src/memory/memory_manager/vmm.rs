@@ -20,12 +20,19 @@ impl MemoryManager {
         flags: PageTableFlags,
         kind: VmaKind,
     ) -> Result<VirtAddr, Oom> {
-        if size == 0 { return Err(Oom); }
-        
+        if size == 0 {
+            return Err(Oom);
+        }
+
         let start = space.find_free_region(size as u64).ok_or(Oom)?;
+
+        if !crate::memory::address_space::is_user_range(start, size as u64) {
+            return Err(Oom);
+        }
+
         let start_page = Page::<Size4KiB>::containing_address(start);
         let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
-        
+
         // 1. Allocate all frames first (Transactional)
         let mut frames = Vec::new();
         for _ in Page::range_inclusive(start_page, end_page) {
@@ -67,16 +74,21 @@ impl MemoryManager {
         flags: PageTableFlags,
         kind: VmaKind,
     ) -> Result<(), Oom> {
-        if size == 0 { return Ok(()); }
-        
+        if size == 0 {
+            return Ok(());
+        }
+
         let end_addr = start + size as u64;
+
         for vma in &space.vmas {
             let vma_end = vma.start + vma.size;
             if start < vma_end && end_addr > vma.start {
-                // Overlap detected! In a real OS, you might unmap the old one first,
-                // but for now, returning an error is safer.
-                return Err(Oom); // Or create a specific MmapError::Overlap
+                return Err(Oom);
             }
+        }
+
+        if !crate::memory::address_space::is_user_range(start, size as u64) {
+            return Err(Oom);
         }
 
         let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
@@ -147,7 +159,7 @@ impl MemoryManager {
         space.vmas = new_vmas;
     }
 
-        /// Register a VMA without mapping physical frames (used for setting up demand paging regions).
+    /// Register a VMA without mapping physical frames (used for setting up demand paging regions).
     pub fn register_vma(
         &mut self,
         space: &mut AddressSpace,
@@ -156,6 +168,13 @@ impl MemoryManager {
         flags: PageTableFlags,
         kind: VmaKind,
     ) {
+        assert!(
+            crate::memory::address_space::is_user_range(start, size as u64),
+            "register_vma: address {:#x} size {:#x} is outside the private user P4 range",
+            start.as_u64(),
+            size
+        );
+
         space.vmas.push(VmArea {
             start,
             size: size as u64,

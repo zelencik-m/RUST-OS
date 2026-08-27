@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{FrameAllocator, PageTableFlags, PhysFrame, Size4KiB};
 use x86_64::VirtAddr;
+use x86_64::structures::paging::Mapper;
+use x86_64::structures::paging::Page;
 
 use crate::debugln;
 use crate::memory::address_space::AddressSpace;
@@ -69,6 +71,9 @@ pub fn switch_to(tid: TID) {
     let mut pm = PROCESS_MANAGER.lock();
 
     let new_owner = pm.thread(tid).get_owner();
+    let new_is_user = pm.thread(tid).is_user;
+    let new_kernel_stack_top = pm.thread(tid).kernel_stack_top;
+
     debugln!("Thread: {:?}, Process:{:?}", tid, new_owner);
 
     let changing = scheduler
@@ -76,30 +81,44 @@ pub fn switch_to(tid: TID) {
         .map(|c| pm.thread(c).get_owner() != new_owner)
         .unwrap_or(true);
 
-    if changing {
-        if let Some(space) = &pm.process(new_owner).address_space {
-            let (_, flags) = Cr3::read();
-            unsafe { Cr3::write(space.cr3(), flags); }
-        } else {
-            let mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
-            let mm = mm_guard.as_ref().expect("MM init");
-            let (_, flags) = Cr3::read();
-            unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
+    // Do scheduler/process bookkeeping before switching CR3.
+    let (old_ctx, new_ctx) = pm.commit_switch(&mut *scheduler, tid);
+
+    // Set TSS RSP0 while still on the current known-good kernel mapping.
+    if new_is_user {
+        unsafe {
+            crate::interrupts::gdt::set_tss_rsp0(new_kernel_stack_top);
         }
     }
 
-    // Set TSS RSP0 if switching to a user thread
-    let new_thread = pm.thread(tid);
-    if new_thread.is_user {
-        unsafe {crate::interrupts::gdt::set_tss_rsp0(new_thread.kernel_stack_top);};
+    // Now switch address spaces.
+if changing {
+    if let Some(space) = &pm.process(new_owner).address_space {
+        debugln!("[switch_to] switching to user CR3 for TID {:?}", tid);
+        let (_, flags) = Cr3::read();
+        unsafe {
+            Cr3::write(space.cr3(), flags);
+        }
+        debugln!("[switch_to] CR3 switch succeeded for TID {:?}", tid);
+    } else {
+        debugln!("[switch_to] switching to kernel CR3 for TID {:?}", tid);
+        let mm_guard = MEMORY_MANAGER.lock();
+        let mm = mm_guard.as_ref().expect("MemoryManager not initialized");
+        let (_, flags) = Cr3::read();
+        unsafe {
+            Cr3::write(mm.kernel_p4_frame, flags);
+        }
+        debugln!("[switch_to] kernel CR3 restored for TID {:?}", tid);
     }
-
-    let (old_ctx, new_ctx) = pm.commit_switch(&mut *scheduler, tid);
+}
     drop(scheduler);
     drop(pm);
 
-    unsafe { thread::switch_context(old_ctx, new_ctx); }
+    unsafe {
+        thread::switch_context(old_ctx, new_ctx);
+    }
 }
+
 pub fn destroy_process(pid: PID) {
     let tids: Vec<TID> = {
         let pm = PROCESS_MANAGER.lock();
@@ -182,18 +201,24 @@ pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, crate::memory:
 }
 
 pub fn demand_map_page(
-    pid: PID, 
-    page_addr: VirtAddr, 
-    leaf_flags: PageTableFlags
+    pid: PID,
+    page_addr: VirtAddr,
+    leaf_flags: PageTableFlags,
 ) -> Result<(), crate::memory::memory_manager::Oom> {
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
-    let space = proc.address_space.as_mut().expect("Process has no address space");
-    
+    let space = proc
+        .address_space
+        .as_mut()
+        .expect("Process has no address space");
+
     mm.demand_map_page(space, page_addr, leaf_flags).map(|_| {
         // Zero the newly mapped page
-        unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
+        unsafe {
+            core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096);
+        }
     })
 }
