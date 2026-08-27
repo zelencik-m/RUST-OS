@@ -359,12 +359,6 @@ extern "C" fn elf_loader_test() -> ! {
         let mut mm_guard = MEMORY_MANAGER.lock();
         let mm = mm_guard.as_mut().unwrap();
 
-        // TEMP:
-        // Your user.elf is probably linked at low addresses.
-        // Until you relink it into USER_SPACE_START range, do not load it.
-        //
-        // let _ = rust_os::process::elf_loader::load_elf(USER_ELF, space, mm);
-
         serial_println!("[elf_loader_test] Mapping code and magic pages...");
 
         let flags = PageTableFlags::PRESENT

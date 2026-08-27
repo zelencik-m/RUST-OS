@@ -92,25 +92,25 @@ pub fn switch_to(tid: TID) {
     }
 
     // Now switch address spaces.
-if changing {
-    if let Some(space) = &pm.process(new_owner).address_space {
-        debugln!("[switch_to] switching to user CR3 for TID {:?}", tid);
-        let (_, flags) = Cr3::read();
-        unsafe {
-            Cr3::write(space.cr3(), flags);
+    if changing {
+        if let Some(space) = &pm.process(new_owner).address_space {
+            debugln!("[switch_to] switching to user CR3 for TID {:?}", tid);
+            let (_, flags) = Cr3::read();
+            unsafe {
+                Cr3::write(space.cr3(), flags);
+            }
+            debugln!("[switch_to] CR3 switch succeeded for TID {:?}", tid);
+        } else {
+            debugln!("[switch_to] switching to kernel CR3 for TID {:?}", tid);
+            let mm_guard = MEMORY_MANAGER.lock();
+            let mm = mm_guard.as_ref().expect("MemoryManager not initialized");
+            let (_, flags) = Cr3::read();
+            unsafe {
+                Cr3::write(mm.kernel_p4_frame, flags);
+            }
+            debugln!("[switch_to] kernel CR3 restored for TID {:?}", tid);
         }
-        debugln!("[switch_to] CR3 switch succeeded for TID {:?}", tid);
-    } else {
-        debugln!("[switch_to] switching to kernel CR3 for TID {:?}", tid);
-        let mm_guard = MEMORY_MANAGER.lock();
-        let mm = mm_guard.as_ref().expect("MemoryManager not initialized");
-        let (_, flags) = Cr3::read();
-        unsafe {
-            Cr3::write(mm.kernel_p4_frame, flags);
-        }
-        debugln!("[switch_to] kernel CR3 restored for TID {:?}", tid);
     }
-}
     drop(scheduler);
     drop(pm);
 
@@ -149,12 +149,15 @@ pub fn map_user_region_for_process(
     leaf_flags: PageTableFlags,
     kind: VmaKind,
 ) -> Result<VirtAddr, Oom> {
-    let mut mm_guard = MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
     let space = proc.address_space.as_mut().expect("Process has no address space");
-    
+
+    // 2. Acquire MemoryManager SECOND
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+
     mm.mmap(space, size, leaf_flags, kind)
 }
 
@@ -165,12 +168,15 @@ pub fn register_vma_only(
     flags: PageTableFlags,
     kind: VmaKind,
 ) {
-    let mut mm_guard = MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
     let space = proc.address_space.as_mut().expect("Process has no address space");
-    
+
+    // 2. Acquire MemoryManager SECOND
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+
     mm.register_vma(space, start, size, flags, kind);
 }
 
@@ -191,12 +197,15 @@ pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
 }
 
 pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, crate::memory::memory_manager::Oom> {
-    let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
     let space = proc.address_space.as_mut().expect("Process has no address space");
-    
+
+    // 2. Acquire MemoryManager SECOND
+    let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+
     mm.sys_brk(space, new_break)
 }
 
@@ -205,15 +214,17 @@ pub fn demand_map_page(
     page_addr: VirtAddr,
     leaf_flags: PageTableFlags,
 ) -> Result<(), crate::memory::memory_manager::Oom> {
-    let mut mm_guard = MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
-
+    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
     let space = proc
         .address_space
         .as_mut()
         .expect("Process has no address space");
+
+    // 2. Acquire MemoryManager SECOND
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
 
     mm.demand_map_page(space, page_addr, leaf_flags).map(|_| {
         // Zero the newly mapped page
