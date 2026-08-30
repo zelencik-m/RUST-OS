@@ -54,6 +54,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         let tid_elf = process_manager::create_thread(PID(0), elf_loader_test);
         debugln!(">>> elf_loader_test created TID({:?})", tid_elf.0);
 
+        debugln!(">>> creating syscall_test thread");
+        let tid_sys = process_manager::create_thread(PID(0), syscall_test);
+        debugln!(">>> syscall_test created TID({:?})", tid_sys.0);
+
         debugln!(">>> entering hlt_loop");
     });
     rust_os::hlt_loop();
@@ -430,5 +434,103 @@ extern "C" fn elf_loader_test() -> ! {
         if val == 0xCAFEBABE {
             debugln!("[elf_loader_test] SUCCESS! User thread executed and wrote magic number!");
         }
+    }
+}
+
+extern "C" fn syscall_test() -> ! {
+    use rust_os::memory::memory_manager::MEMORY_MANAGER;
+    use rust_os::process::process_manager::PROCESS_MANAGER;
+    use x86_64::registers::control::Cr3;
+    use rust_os::process::process_manager::{create_user_process, create_user_thread};
+    use rust_os::scheduler::scheduler::sleep;
+    use rust_os::serial_println;
+    use x86_64::structures::paging::PageTableFlags;
+    use x86_64::VirtAddr;
+    use rust_os::memory::vma::VmaKind;
+
+    serial_println!("[syscall_test] Creating user process...");
+    let upid = create_user_process("syscall_test".into());
+    
+    // Pick an arbitrary user-space address for our code page
+    let user_base = rust_os::memory::address_space::USER_SPACE_START + 0x100000;
+    
+    let target_cr3 = {
+        let mut pm_guard = PROCESS_MANAGER.lock();
+        let proc = pm_guard.process_mut(upid);
+        let space = proc.address_space.as_mut().unwrap();
+        let mut mm_guard = MEMORY_MANAGER.lock();
+        let mm = mm_guard.as_mut().unwrap();
+        
+        serial_println!("[syscall_test] Mapping code page...");
+        let flags = PageTableFlags::PRESENT
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::USER_ACCESSIBLE;
+            
+        let code_addr = VirtAddr::new(user_base);
+        mm.mmap_at(space, code_addr, 4096, flags, VmaKind::Code).unwrap();
+        space.cr3()
+    };
+
+    let code_addr = VirtAddr::new(user_base);
+    let msg_addr = code_addr + 0x40u64; // Place string at offset 64 in the same page
+
+    // Switch to the user address space so we can write the payload directly
+    let (current_cr3, cr3_flags) = Cr3::read();
+    if current_cr3 != target_cr3 {
+        unsafe { Cr3::write(target_cr3, cr3_flags); }
+    }
+
+    let ptr = code_addr.as_mut_ptr::<u8>();
+    
+    // Hand-assembled x86_64 machine code:
+    // 1. SYS_WRITE (rax=1, rdi=1, rsi=msg_addr, rdx=16) -> int 0x80
+    // 2. SYS_EXIT  (rax=60, rdi=0)                       -> int 0x80
+    let mut code = [
+        // mov rdi, 1 (stdout)
+        0x48u8, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00,
+        // mov rsi, IMM64 (string address, patched below)
+        0x48, 0xbe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        // mov rdx, 16 (string length)
+        0x48, 0xc7, 0xc2, 0x10, 0x00, 0x00, 0x00,
+        // mov rax, 1 (SYS_WRITE)
+        0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00,
+        // int 0x80
+        0xcd, 0x80,
+
+        // mov rdi, 0 (exit code)
+        0x48, 0xc7, 0xc7, 0x00, 0x00, 0x00, 0x00,
+        // mov rax, 60 (SYS_EXIT)
+        0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00,
+        // int 0x80
+        0xcd, 0x80,
+
+        // fallback infinite loop (jmp -2) just in case
+        0xeb, 0xfe,
+    ];
+
+    // Patch the IMM64 placeholder for `mov rsi, ...` with the actual string address
+    let msg_addr_bytes = msg_addr.as_u64().to_le_bytes();
+    code[9..17].copy_from_slice(&msg_addr_bytes);
+
+    unsafe {
+        // Write the code
+        core::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
+        
+        // Write the string at offset 0x40
+        let msg_ptr = (code_addr + 0x40u64).as_mut_ptr::<u8>();
+        let msg = b"Hello syscalls!\n";
+        core::ptr::copy_nonoverlapping(msg.as_ptr(), msg_ptr, msg.len());
+    }
+
+    // Restore kernel CR3 before continuing
+    unsafe { Cr3::write(current_cr3, cr3_flags); }
+
+    serial_println!("[syscall_test] Creating user thread...");
+    let utid = create_user_thread(upid, code_addr);
+    serial_println!("[syscall_test] User thread created TID({:?})", utid.0);
+
+    // Keep the test thread alive so the kernel doesn't halt
+    loop {
+        sleep(50);
     }
 }

@@ -259,3 +259,79 @@ pub fn handle_thread_page_fault(tid: TID, fault_addr: VirtAddr) -> (PID, FaultAc
 
     (owner, action)
 }
+
+pub fn get_current_brk(pid: PID) -> Option<VirtAddr> {
+    let pm_guard = PROCESS_MANAGER.lock();
+    let proc = pm_guard.process(pid);
+    let space = proc.address_space.as_ref()?;
+
+    Some(space.heap_break)
+}
+
+pub fn sys_mmap_anonymous(
+    pid: PID,
+    size: usize,
+    flags: PageTableFlags,
+) -> Result<VirtAddr, Oom> {
+    if size == 0 || (size & 0xFFF) != 0 {
+        return Err(Oom);
+    }
+
+    let mut pm_guard = PROCESS_MANAGER.lock();
+
+    let proc = pm_guard.process_mut(pid);
+
+    let space = proc
+        .address_space
+        .as_mut()
+        .ok_or(Oom)?;
+
+    // Use top-down allocation so anonymous mappings do not immediately
+    // collide with the bottom-up brk region.
+    let start = space
+        .find_free_region_top_down(size as u64)
+        .ok_or(Oom)?;
+
+    let mut mm_guard = MEMORY_MANAGER.lock();
+
+    let mm = mm_guard
+        .as_mut()
+        .ok_or(Oom)?;
+
+    mm.mmap_at(space, start, size, flags, VmaKind::Mapped)?;
+
+    Ok(start)
+}
+
+pub fn sys_munmap(
+    pid: PID,
+    addr: VirtAddr,
+    size: usize,
+) -> Result<(), Oom> {
+    if size == 0 {
+        return Ok(());
+    }
+
+    if (addr.as_u64() & 0xFFF) != 0 || (size & 0xFFF) != 0 {
+        return Err(Oom);
+    }
+
+    let mut pm_guard = PROCESS_MANAGER.lock();
+
+    let proc = pm_guard.process_mut(pid);
+
+    let space = proc
+        .address_space
+        .as_mut()
+        .ok_or(Oom)?;
+
+    let mut mm_guard = MEMORY_MANAGER.lock();
+
+    let mm = mm_guard
+        .as_mut()
+        .ok_or(Oom)?;
+
+    mm.munmap(space, addr, size);
+
+    Ok(())
+}

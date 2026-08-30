@@ -7,10 +7,13 @@ use lazy_static::lazy_static;
 use pic8259::ChainedPics;
 use spin;
 use x86_64::structures::idt::PageFaultErrorCode;
-
+use x86_64::VirtAddr;
+use x86_64::PrivilegeLevel;
 use crate::serial_println;
 use crate::scheduler::scheduler::{SCHEDULER, yield_now};
 use crate::PROCESS_MANAGER;
+use crate::syscall::entry;
+use crate::syscall::numbers::SYS_EXIT;
 use core::arch::global_asm;
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -49,6 +52,15 @@ lazy_static! {
 
         idt.general_protection_fault.set_handler_fn(general_protection_fault_handler);
 
+        let syscall_stub =
+        
+        VirtAddr::new(core::ptr::addr_of!(entry::syscall_int_stub) as u64);
+
+        unsafe {
+            idt[0x80]
+            .set_handler_addr(syscall_stub)
+            .set_privilege_level(PrivilegeLevel::Ring3);
+        };
 
         idt
     };
