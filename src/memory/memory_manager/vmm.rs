@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 pub struct Oom;
 
 impl MemoryManager {
-     pub fn mmap(
+    pub fn mmap(
         &mut self,
         space: &mut AddressSpace,
         size: usize,
@@ -23,13 +23,10 @@ impl MemoryManager {
         if size == 0 {
             return Err(Oom);
         }
-
         let start = space.find_free_region(size as u64).ok_or(Oom)?;
-
         if !crate::memory::address_space::is_user_range(start, size as u64) {
             return Err(Oom);
         }
-
         let start_page = Page::<Size4KiB>::containing_address(start);
         let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
 
@@ -51,22 +48,46 @@ impl MemoryManager {
         // 2. Now map them (Mapping rarely fails unless there's a bug in our logic)
         let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
         let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
+        let mut frames_iter = frames.into_iter();
+        let mut mapped_pages = Vec::new();
         
-        for (page, frame) in Page::range_inclusive(start_page, end_page).zip(frames.into_iter()) {
+        for page in Page::range_inclusive(start_page, end_page) {
+            let frame = frames_iter.next().unwrap();
             unsafe {
-                mapper.map_to_with_table_flags(
+                match mapper.map_to_with_table_flags(
                     page, frame, flags | PageTableFlags::USER_ACCESSIBLE,
                     parent_flags, &mut self.frame_allocator,
-                ).map_err(|_| Oom)?.flush();
+                ) {
+                    Ok(flush) => {
+                        flush.flush();
+                        mapped_pages.push((page, frame));
+                    }
+                    Err(_) => {
+                        // Rollback successfully mapped pages
+                        for (mapped_page, _) in mapped_pages {
+                            if let Ok((unmapped_frame, flush)) = mapper.unmap(mapped_page) {
+                                flush.flush();
+                                self.frame_allocator.free_frame(unmapped_frame);
+                            }
+                        }
+                        // Free the frame that failed to map
+                        self.frame_allocator.free_frame(frame);
+                        // Free any remaining unallocated frames
+                        for remaining_frame in frames_iter {
+                            self.frame_allocator.free_frame(remaining_frame);
+                        }
+                        return Err(Oom);
+                    }
+                }
             }
         }
-        
+
         // 3. Commit the VMA
         space.vmas.push(VmArea { start, size: size as u64, flags, kind });
         Ok(start)
     }
 
- pub fn mmap_at(
+    pub fn mmap_at(
         &mut self,
         space: &mut AddressSpace,
         start: VirtAddr,
@@ -77,33 +98,62 @@ impl MemoryManager {
         if size == 0 {
             return Ok(());
         }
-
         let end_addr = start + size as u64;
-
         for vma in &space.vmas {
             let vma_end = vma.start + vma.size;
             if start < vma_end && end_addr > vma.start {
                 return Err(Oom);
             }
         }
-
         if !crate::memory::address_space::is_user_range(start, size as u64) {
             return Err(Oom);
         }
-
+        
         let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
         let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
-        
         let start_page = Page::<Size4KiB>::containing_address(start);
         let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
         
+        let mut mapped_pages = Vec::new();
         for page in Page::range_inclusive(start_page, end_page) {
-            let frame = self.frame_allocator.allocate_frame().ok_or(Oom)?;
+            let frame = match self.frame_allocator.allocate_frame() {
+                Some(f) => f,
+                None => {
+                    // Rollback previously mapped pages if allocation fails
+                    for (mapped_page, _) in mapped_pages {
+                        if let Ok((unmapped_frame, flush)) = mapper.unmap(mapped_page) {
+                            flush.flush();
+                            unsafe {
+                                self.frame_allocator.free_frame(unmapped_frame);
+                            };  
+                        }
+                    }
+                    return Err(Oom);
+                }
+            };
+
             unsafe {
-                mapper.map_to_with_table_flags(
+                match mapper.map_to_with_table_flags(
                     page, frame, flags | PageTableFlags::USER_ACCESSIBLE,
                     parent_flags, &mut self.frame_allocator,
-                ).map_err(|_| Oom)?.flush();
+                ) {
+                    Ok(flush) => {
+                        flush.flush();
+                        mapped_pages.push((page, frame));
+                    }
+                    Err(_) => {
+                        // Rollback successfully mapped pages
+                        for (mapped_page, _) in mapped_pages {
+                            if let Ok((unmapped_frame, flush)) = mapper.unmap(mapped_page) {
+                                flush.flush();
+                                self.frame_allocator.free_frame(unmapped_frame);
+                            }
+                        }
+                        // Free the frame that failed to map
+                        self.frame_allocator.free_frame(frame);
+                        return Err(Oom);
+                    }
+                }
             }
         }
         
