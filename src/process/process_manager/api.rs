@@ -16,7 +16,7 @@ use x86_64::structures::paging::Page;
 
 use crate::debugln;
 use crate::memory::address_space::AddressSpace;
-use crate::memory::memory_manager::{MEMORY_MANAGER, Oom};
+use crate::memory::memory_manager::{FaultAction, MEMORY_MANAGER, Oom};
 use crate::memory::vma::VmaKind;
 use crate::process::thread::{self, TID};
 use crate::process::PID;
@@ -217,6 +217,7 @@ pub fn demand_map_page(
 ) -> Result<(), crate::memory::memory_manager::Oom> {
     // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
+
     let proc = pm_guard.process_mut(pid);
     let space = proc
         .address_space
@@ -230,4 +231,31 @@ pub fn demand_map_page(
     // demand_map_page now handles zeroing internally via the
     // physical-memory direct map, so no extra work needed here.
     mm.demand_map_page(space, page_addr, leaf_flags)
+}
+
+pub fn handle_thread_page_fault(tid: TID, fault_addr: VirtAddr) -> (PID, FaultAction) {
+    let mut pm_guard = PROCESS_MANAGER.lock();
+
+    let owner = pm_guard.thread(tid).get_owner();
+
+    // Kernel threads or processes without a user address space cannot
+    // resolve user-style page faults.
+    if pm_guard.process(owner).address_space.is_none() {
+        return (owner, FaultAction::Segfault);
+    }
+
+    let space = pm_guard
+        .process_mut(owner)
+        .address_space
+        .as_mut()
+        .expect("address space was checked above");
+
+    let mut mm_guard = MEMORY_MANAGER.lock();
+
+    let action = match mm_guard.as_mut() {
+        Some(mm) => mm.handle_page_fault(space, fault_addr),
+        None => FaultAction::Oom,
+    };
+
+    (owner, action)
 }

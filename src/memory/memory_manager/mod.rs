@@ -14,7 +14,7 @@ mod allocators;
 
 // Re-export public types/enums so `use crate::memory::memory_manager::Oom` still works
 pub use vmm::Oom;
-pub use fault::{FaultAction, PageFaultError};
+pub use fault::FaultAction;
 
 pub struct MemoryManager {
     pub mapper: OffsetPageTable<'static>,

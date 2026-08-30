@@ -14,4 +14,4 @@ pub use address_space::AddressSpace;
 pub use paging::{init, create_example_mapping};
 pub use translate::translate_addr;
 pub use vma::VmArea;
-pub use memory_manager::{MemoryManager, MEMORY_MANAGER, Oom, FaultAction, PageFaultError};
+pub use memory_manager::{MemoryManager, MEMORY_MANAGER, Oom, FaultAction};

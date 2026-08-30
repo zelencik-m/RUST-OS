@@ -62,50 +62,61 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    use crate::memory::memory_manager::FaultAction;
     use x86_64::registers::control::Cr2;
-    use x86_64::structures::paging::{Page, Size4KiB};
 
     let fault_addr = Cr2::read();
-    let page_addr  = Page::<Size4KiB>::containing_address(fault_addr).start_address();
 
     let tid = match SCHEDULER.lock().get_current() {
         Some(t) => t,
         None => panic!(
-            "PAGE FAULT in kernel, no current thread\n  addr: {:?}\n  err:  {:?}\n{:#?}",
-            fault_addr, error_code, stack_frame
+            "PAGE FAULT in kernel, no current thread\naddr: {:?}\nerr:  {:?}\n{:#?}",
+            fault_addr,
+            error_code,
+            stack_frame
         ),
     };
 
-    let (owner, vma) = {
-        let pm = PROCESS_MANAGER.lock();
-        let owner = pm.thread(tid).get_owner();
-        let vma = pm.get_vma(owner, fault_addr);
-        (owner, vma)
-    };
+    let (owner, action) =
+        crate::process::process_manager::handle_thread_page_fault(tid, fault_addr);
 
-    match vma {
-        Some(vma) => {
-            if vma.kind == crate::memory::vma::VmaKind::Guard {
-                serial_println!("PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})", owner.0, tid);
-                crate::process::process_manager::kill_current_thread_and_schedule(tid);
-                return;
-            }
-
-            match crate::process::process_manager::demand_map_page(owner, page_addr, vma.flags) {
-                Ok(()) => {
-                }
-                Err(_) => {
-                    serial_println!("PAGE FAULT: OOM while mapping PID({}), TID({:?})", owner.0, tid);
-                    serial_println!("  faulting addr: {:?}", fault_addr);
-                    crate::process::process_manager::kill_current_thread_and_schedule(tid);
-                }
-            }
+    match action {
+        FaultAction::Resolved => {
+            // The faulting instruction will be retried automatically.
         }
-        None => {
-            serial_println!("PAGE FAULT: killing PID({}), TID({:?})", owner.0, tid);
+
+        FaultAction::Guard => {
+            serial_println!(
+                "PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})",
+                owner.0,
+                tid
+            );
+            serial_println!("  faulting addr: {:?}", fault_addr);
+
+            crate::process::process_manager::kill_current_thread_and_schedule(tid);
+        }
+
+        FaultAction::Segfault => {
+            serial_println!(
+                "PAGE FAULT: killing PID({}), TID({:?})",
+                owner.0,
+                tid
+            );
             serial_println!("  faulting addr: {:?}", fault_addr);
             serial_println!("  error code:    {:?}", error_code);
             serial_println!("{:#?}", stack_frame);
+
+            crate::process::process_manager::kill_current_thread_and_schedule(tid);
+        }
+
+        FaultAction::Oom => {
+            serial_println!(
+                "PAGE FAULT: OOM while mapping PID({}), TID({:?})",
+                owner.0,
+                tid
+            );
+            serial_println!("  faulting addr: {:?}", fault_addr);
+
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
     }
