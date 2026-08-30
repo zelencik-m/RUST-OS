@@ -1,3 +1,5 @@
+// src/debug/macros.rs
+
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {

@@ -1,8 +1,6 @@
+// src/interrupts/mod.rs
 
 pub mod gdt;
-
-
-// src/interrupts/mod.rs
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
 use lazy_static::lazy_static;
@@ -10,22 +8,10 @@ use pic8259::ChainedPics;
 use spin;
 use x86_64::structures::idt::PageFaultErrorCode;
 
-use crate::hlt_loop;
 use crate::serial_println;
-use crate::print;
-use crate::scheduler::scheduler::schedule;
-use crate::scheduler::scheduler::{Scheduler, SCHEDULER, yield_now};
+use crate::scheduler::scheduler::{SCHEDULER, yield_now};
 use crate::PROCESS_MANAGER;
-use crate::process::PID;
-use crate::MEMORY_MANAGER;
-use crate::process::thread::TID;
-
-use x86_64::VirtAddr;
-use x86_64::structures::paging::PageTableFlags;
-use x86_64::structures::paging::Page;
-use x86_64::structures::paging::Size4KiB;
-use x86_64::structures::paging::FrameAllocator;
-use x86_64::structures::paging::Mapper;
+use core::arch::global_asm;
 
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
@@ -49,7 +35,6 @@ lazy_static! {
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
 
-        // 3. Update IDT to point to the naked wrapper
         unsafe {
             idt[InterruptIndex::Timer.as_usize()]
                 .set_handler_fn(core::mem::transmute::<*const (), extern "x86-interrupt" fn(InterruptStackFrame)>(
@@ -73,7 +58,6 @@ pub fn init_idt() {
     IDT.load();
 }
 
-// src/interrupts/mod.rs
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
@@ -84,7 +68,6 @@ extern "x86-interrupt" fn page_fault_handler(
     let fault_addr = Cr2::read();
     let page_addr  = Page::<Size4KiB>::containing_address(fault_addr).start_address();
 
-    // 1. Who faulted?
     let tid = match SCHEDULER.lock().get_current() {
         Some(t) => t,
         None => panic!(
@@ -93,18 +76,15 @@ extern "x86-interrupt" fn page_fault_handler(
         ),
     };
 
-    // 2. Ask ProcessManager for the full VMA
     let (owner, vma) = {
         let pm = PROCESS_MANAGER.lock();
         let owner = pm.thread(tid).get_owner();
         let vma = pm.get_vma(owner, fault_addr);
         (owner, vma)
-    }; // pm lock is dropped here to prevent deadlocks when demanding pages
+    };
 
-    // 3. Act on the answer
     match vma {
         Some(vma) => {
-            // Catch stack overflows hitting the guard page
             if vma.kind == crate::memory::vma::VmaKind::Guard {
                 serial_println!("PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})", owner.0, tid);
                 crate::process::process_manager::kill_current_thread_and_schedule(tid);
@@ -113,7 +93,6 @@ extern "x86-interrupt" fn page_fault_handler(
 
             match crate::process::process_manager::demand_map_page(owner, page_addr, vma.flags) {
                 Ok(()) => {
-                    // return → iretq retries the faulting instruction
                 }
                 Err(_) => {
                     serial_println!("PAGE FAULT: OOM while mapping PID({}), TID({:?})", owner.0, tid);
@@ -158,10 +137,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     }
 }
 
-// Add this import at the top of the file if not already present
-use core::arch::global_asm;
 
-// 1. Naked Wrapper
 global_asm!(
     ".global timer_interrupt_wrapper",
     "timer_interrupt_wrapper:",
@@ -199,7 +175,6 @@ extern "C" {
     fn timer_interrupt_wrapper();
 }
 
-// 2. Rust Handler
 #[no_mangle]
 extern "C" fn timer_interrupt_rust_handler() {
     let should_switch = SCHEDULER.lock().tick(); // lock dropped immediately

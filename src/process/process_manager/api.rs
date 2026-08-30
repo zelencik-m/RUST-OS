@@ -70,6 +70,11 @@ pub fn switch_to(tid: TID) {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
 
+    // Free any zombie threads that died since the last context switch.
+    // We are running on `scheduler.current`'s kernel stack, so
+    // `reap_dead_threads` skips that one and frees the rest.
+    pm.reap_dead_threads(scheduler.current);
+
     let new_owner = pm.thread(tid).get_owner();
     let new_is_user = pm.thread(tid).is_user;
     let new_kernel_stack_top = pm.thread(tid).kernel_stack_top;
@@ -81,36 +86,28 @@ pub fn switch_to(tid: TID) {
         .map(|c| pm.thread(c).get_owner() != new_owner)
         .unwrap_or(true);
 
-    // Do scheduler/process bookkeeping before switching CR3.
     let (old_ctx, new_ctx) = pm.commit_switch(&mut *scheduler, tid);
 
-    // Set TSS RSP0 while still on the current known-good kernel mapping.
     if new_is_user {
-        unsafe {
-            crate::interrupts::gdt::set_tss_rsp0(new_kernel_stack_top);
-        }
+        unsafe { crate::interrupts::gdt::set_tss_rsp0(new_kernel_stack_top); }
     }
 
-    // Now switch address spaces.
     if changing {
         if let Some(space) = &pm.process(new_owner).address_space {
             debugln!("[switch_to] switching to user CR3 for TID {:?}", tid);
             let (_, flags) = Cr3::read();
-            unsafe {
-                Cr3::write(space.cr3(), flags);
-            }
+            unsafe { Cr3::write(space.cr3(), flags); }
             debugln!("[switch_to] CR3 switch succeeded for TID {:?}", tid);
         } else {
             debugln!("[switch_to] switching to kernel CR3 for TID {:?}", tid);
             let mm_guard = MEMORY_MANAGER.lock();
             let mm = mm_guard.as_ref().expect("MemoryManager not initialized");
             let (_, flags) = Cr3::read();
-            unsafe {
-                Cr3::write(mm.kernel_p4_frame, flags);
-            }
+            unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
             debugln!("[switch_to] kernel CR3 restored for TID {:?}", tid);
         }
     }
+
     drop(scheduler);
     drop(pm);
 
@@ -185,13 +182,17 @@ pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
     {
         let mut sched = SCHEDULER.lock();
         sched.remove_from_runnables(tid);
-        sched.current = None; // critical: don't save our context
+        // IMPORTANT: keep `sched.current == Some(tid)`. We are still executing
+        // on this thread's kernel stack, and the reaper uses `current` to know
+        // which stack it must NOT free yet. `commit_switch` overwrites it the
+        // moment we switch away below. (The thread is Zombie and no longer in
+        // `runnables`, so it can never be scheduled again.)
     }
     {
         let mut pm = PROCESS_MANAGER.lock();
-        pm.kill_current_thread(tid);
+        pm.kill_current_thread(tid); // Running -> Exited -> Zombie (+ destroy AS if last)
+        pm.enqueue_for_reap(tid);    // defer freeing the kernel stack & recycling the TID
     }
-
     crate::scheduler::scheduler::schedule();
     crate::hlt_loop();
 }
