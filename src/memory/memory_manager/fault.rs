@@ -1,7 +1,5 @@
-// src/memory/memory_manager/fault.rs
-
 use super::MemoryManager;
-use super::vmm::Oom; // Import Oom from sibling module
+use super::vmm::Oom;
 use crate::memory::address_space::AddressSpace;
 use crate::memory::vma::VmaKind;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB, Mapper, FrameAllocator};
@@ -20,19 +18,17 @@ impl MemoryManager {
         fault_addr: VirtAddr,
     ) -> Result<FaultAction, PageFaultError> {
         let page_addr = Page::<Size4KiB>::containing_address(fault_addr).start_address();
-        
+
         if let Some(vma) = space.get_vma(fault_addr) {
             // Catch stack overflows hitting the guard page
             if vma.kind == VmaKind::Guard {
                 return Ok(FaultAction::Segfault);
             }
-            
-            // In a VMA, demand map it
-            self.demand_map_page(space, page_addr, vma.flags)
-                .map(|_| {
-                    unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
-                    FaultAction::Resolved
-                })
+
+            // In a VMA, demand map the page.
+            let flags = vma.flags;
+            self.demand_map_page(space, page_addr, flags)
+                .map(|_| FaultAction::Resolved)
                 .map_err(|_| PageFaultError)
         } else {
             Ok(FaultAction::Segfault)
@@ -46,7 +42,6 @@ impl MemoryManager {
         leaf_flags: PageTableFlags,
     ) -> Result<(), Oom> {
         let frame = self.frame_allocator.allocate_frame().ok_or(Oom)?;
-
         let parent_flags = PageTableFlags::PRESENT
             | PageTableFlags::WRITABLE
             | PageTableFlags::USER_ACCESSIBLE;
@@ -66,7 +61,16 @@ impl MemoryManager {
                 .map_err(|_| Oom)?
                 .flush();
         }
-        
+
+        // Zero the newly mapped page via the physical-memory direct map,
+        // so this works regardless of which CR3 is currently active.
+        let kernel_ptr = (self.physical_memory_offset
+            + frame.start_address().as_u64())
+            .as_mut_ptr::<u8>();
+        unsafe {
+            core::ptr::write_bytes(kernel_ptr, 0, 4096);
+        }
+
         Ok(())
     }
 }

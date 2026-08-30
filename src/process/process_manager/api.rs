@@ -227,10 +227,7 @@ pub fn demand_map_page(
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
 
-    mm.demand_map_page(space, page_addr, leaf_flags).map(|_| {
-        // Zero the newly mapped page
-        unsafe {
-            core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096);
-        }
-    })
+    // demand_map_page now handles zeroing internally via the
+    // physical-memory direct map, so no extra work needed here.
+    mm.demand_map_page(space, page_addr, leaf_flags)
 }
