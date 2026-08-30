@@ -9,6 +9,7 @@ use x86_64::{
     },
     VirtAddr,
 };
+use x86_64::PhysAddr;
 
 use crate::memory::paging::active_level_4_table;
 use crate::memory::vma::VmArea;
@@ -178,5 +179,39 @@ impl AddressSpace {
         } else {
             None
         }
+    }
+
+    pub fn translate(
+        &self,
+        physical_memory_offset: VirtAddr,
+        addr: VirtAddr,
+    ) -> Option<PhysAddr> {
+        use x86_64::structures::paging::page_table::FrameError;
+
+        let mut frame = self.p4_frame;
+
+        for &index in &[
+            addr.p4_index(),
+            addr.p3_index(),
+            addr.p2_index(),
+            addr.p1_index(),
+        ] {
+            let table_virt = physical_memory_offset + frame.start_address().as_u64();
+            let table_ptr = table_virt.as_ptr::<PageTable>();
+            let table = unsafe { &*table_ptr };
+
+            let entry = &table[index];
+
+            match entry.frame() {
+                Ok(next_frame) => frame = next_frame,
+                Err(FrameError::FrameNotPresent) => return None,
+                Err(FrameError::HugeFrame) => {
+                    // Huge pages are not supported by this loader.
+                    return None;
+                }
+            }
+        }
+
+        Some(frame.start_address() + u64::from(addr.page_offset()))
     }
 }
