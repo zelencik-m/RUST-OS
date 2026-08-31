@@ -1,5 +1,4 @@
-// src/syscalls/uacess.rs
-
+// src/syscalls/uaccess.rs
 use crate::memory::address_space::is_user_range;
 use crate::memory::memory_manager::{FaultAction, MEMORY_MANAGER};
 use crate::memory::vma::VmaKind;
@@ -15,13 +14,11 @@ use x86_64::VirtAddr;
 /// non-canonical addresses, and user input must never panic the kernel.
 pub fn canonical_user_addr(addr: u64) -> Result<VirtAddr, SysError> {
     let high = addr >> 48;
-
     // 4-level paging canonical addresses have bits 48..63 all zero
     // or all one.
     if high != 0 && high != 0xffff {
         return Err(SysError::Efault);
     }
-
     Ok(VirtAddr::new(addr))
 }
 
@@ -33,19 +30,15 @@ pub fn canonical_user_addr(addr: u64) -> Result<VirtAddr, SysError> {
 /// - that the whole range lies inside your user P4 slot.
 pub fn validate_user_range(start: u64, size: usize) -> Result<VirtAddr, SysError> {
     let addr = canonical_user_addr(start)?;
-
     if size == 0 {
         return Ok(addr);
     }
-
     let _end = start
         .checked_add(size as u64 - 1)
         .ok_or(SysError::Efault)?;
-
     if !is_user_range(addr, size as u64) {
         return Err(SysError::Efault);
     }
-
     Ok(addr)
 }
 
@@ -67,6 +60,10 @@ pub fn copy_to_user(
     copy_user_internal(pid, dst, src.as_ptr() as *mut u8, src.len(), true)
 }
 
+// FIX 5: Added note about defense-in-depth bounds checking.
+// Note: `copy_user_internal` re-validates the user range via `is_user_range` even if
+// the caller (e.g. `sys_write`) already called `validate_user_range`. This is intentional
+// defense-in-depth to ensure memory safety even if a future syscall forgets the initial check.
 fn copy_user_internal(
     pid: PID,
     addr: VirtAddr,
@@ -79,7 +76,6 @@ fn copy_user_internal(
     }
 
     let addr = canonical_user_addr(addr.as_u64())?;
-
     if !is_user_range(addr, len as u64) {
         return Err(SysError::Efault);
     }
@@ -90,13 +86,11 @@ fn copy_user_internal(
     // ProcessManager -> MemoryManager
     let mut pm = PROCESS_MANAGER.lock();
     let mut mm_guard = MEMORY_MANAGER.lock();
-
     let mm = mm_guard
         .as_mut()
         .ok_or(SysError::Enomem)?;
 
     let proc = pm.process_mut(pid);
-
     let space = proc
         .address_space
         .as_mut()
@@ -104,7 +98,6 @@ fn copy_user_internal(
 
     while offset < len {
         let cur = addr + offset as u64;
-
         let page_offset = cur.as_u64() & 0xFFF;
         let chunk = core::cmp::min(
             (4096 - page_offset) as usize,
@@ -132,11 +125,9 @@ fn copy_user_internal(
         if vma.kind == VmaKind::Guard {
             return Err(SysError::Efault);
         }
-
         if !vma.flags.contains(PageTableFlags::USER_ACCESSIBLE) {
             return Err(SysError::Efault);
         }
-
         if write_to_user && !vma.flags.contains(PageTableFlags::WRITABLE) {
             return Err(SysError::Efault);
         }

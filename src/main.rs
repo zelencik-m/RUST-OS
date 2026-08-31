@@ -341,11 +341,10 @@ static USER_ELF: &[u8] = &ALIGNED_ELF.0;
 extern "C" fn elf_loader_test() -> ! {
     use rust_os::memory::memory_manager::MEMORY_MANAGER;
     use rust_os::process::process_manager::PROCESS_MANAGER;
-    use x86_64::registers::control::Cr3;
     use rust_os::process::process_manager::{create_user_process, create_user_thread};
     use rust_os::scheduler::scheduler::sleep;
     use rust_os::serial_println;
-    use x86_64::structures::paging::{Page, Size4KiB, PageTableFlags, FrameAllocator, Mapper};
+    use x86_64::structures::paging::PageTableFlags;
     use x86_64::VirtAddr;
     use rust_os::memory::vma::VmaKind;
 
@@ -354,8 +353,10 @@ extern "C" fn elf_loader_test() -> ! {
     let upid = create_user_process("elf_test".into());
 
     let user_base = rust_os::memory::address_space::USER_SPACE_START + 0x100000;
+    let code_addr = VirtAddr::new(user_base);
+    let magic_addr = VirtAddr::new(user_base + 0x1000);
 
-    let target_cr3 = {
+    {
         let mut pm_guard = PROCESS_MANAGER.lock();
         let proc = pm_guard.process_mut(upid);
         let space = proc.address_space.as_mut().unwrap();
@@ -369,42 +370,18 @@ extern "C" fn elf_loader_test() -> ! {
             | PageTableFlags::WRITABLE
             | PageTableFlags::USER_ACCESSIBLE;
 
-        let code_addr = VirtAddr::new(user_base);
-        let magic_addr = VirtAddr::new(user_base + 0x1000);
-
         mm.mmap_at(space, code_addr, 4096, flags, VmaKind::Code).unwrap();
         mm.mmap_at(space, magic_addr, 4096, flags, VmaKind::Data).unwrap();
 
-        space.cr3()
-    };
+        serial_println!("[elf_loader_test] Writing code via direct map...");
 
-    let code_addr = VirtAddr::new(user_base);
-    let magic_addr = VirtAddr::new(user_base + 0x1000);
-
-    // Switch to the user address space so we can write directly to the mappings.
-    let (current_cr3, cr3_flags) = Cr3::read();
-
-    if current_cr3 != target_cr3 {
-        unsafe {
-            Cr3::write(target_cr3, cr3_flags);
-        }
-    }
-
-    let ptr = code_addr.as_mut_ptr::<u8>();
-
-    unsafe {
         let code = [
             0xc7, 0x05, 0xf6, 0x0f, 0x00, 0x00,
             0xbe, 0xba, 0xfe, 0xca,
             0xeb, 0xfe,
         ];
 
-        core::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
-    }
-
-    // Restore kernel CR3 before continuing.
-    unsafe {
-        Cr3::write(current_cr3, cr3_flags);
+        write_user_bytes(space, mm.physical_memory_offset, code_addr, &code);
     }
 
     serial_println!("[elf_loader_test] Creating user thread...");
@@ -416,24 +393,60 @@ extern "C" fn elf_loader_test() -> ! {
     loop {
         sleep(50);
 
-        let (cur_cr3, flags) = Cr3::read();
+        let pm_guard = PROCESS_MANAGER.lock();
+        let proc = pm_guard.process(upid);
+        let space = proc.address_space.as_ref().unwrap();
 
-        unsafe {
-            Cr3::write(target_cr3, flags);
-        }
+        let mm_guard = MEMORY_MANAGER.lock();
+        let mm = mm_guard.as_ref().unwrap();
 
-        let magic_ptr = magic_addr.as_mut_ptr::<u32>();
-        let val = unsafe { core::ptr::read_volatile(magic_ptr) };
+        let val = read_user_u32(space, mm.physical_memory_offset, magic_addr);
 
-        unsafe {
-            Cr3::write(cur_cr3, flags);
-        }
-
-        debugln!("[elf_loader_test] Magic value at {:#x}: {:#x}", magic_addr.as_u64(), val);
+        debugln!(
+            "[elf_loader_test] Magic value at {:#x}: {:#x}",
+            magic_addr.as_u64(),
+            val
+        );
 
         if val == 0xCAFEBABE {
             debugln!("[elf_loader_test] SUCCESS! User thread executed and wrote magic number!");
         }
+    }
+}
+
+/// Write bytes into a user address space via the kernel's physical-memory
+/// direct map, without switching CR3. Assumes the destination fits within a
+/// single already-mapped page (fine for this small test).
+fn write_user_bytes(
+    space: &rust_os::memory::AddressSpace,
+    physical_memory_offset: VirtAddr,
+    dst: VirtAddr,
+    bytes: &[u8],
+) {
+    let phys = space
+        .translate(physical_memory_offset, dst)
+        .expect("write_user_bytes: destination not mapped");
+
+    let kernel_ptr = (physical_memory_offset + phys.as_u64()).as_mut_ptr::<u8>();
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), kernel_ptr, bytes.len());
+    }
+}
+
+/// Read a u32 from a user address space via the direct map, without
+/// switching CR3.
+fn read_user_u32(
+    space: &rust_os::memory::AddressSpace,
+    physical_memory_offset: VirtAddr,
+    addr: VirtAddr,
+) -> u32 {
+    match space.translate(physical_memory_offset, addr) {
+        Some(phys) => {
+            let kernel_ptr = (physical_memory_offset + phys.as_u64()).as_ptr::<u32>();
+            unsafe { core::ptr::read_volatile(kernel_ptr) }
+        }
+        None => 0, // page not yet mapped/demand-paged in
     }
 }
 

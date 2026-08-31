@@ -1,5 +1,4 @@
 // src/syscalls/dispatch.rs
-
 use crate::memory::address_space::{is_user_range, USER_SPACE_END, USER_SPACE_START};
 use crate::process::process_manager::{
     get_current_brk, kill_current_thread_and_schedule, sys_brk, sys_mmap_anonymous,
@@ -12,16 +11,23 @@ use crate::syscall::errors::SysError;
 use crate::syscall::frame::SyscallFrame;
 use crate::syscall::numbers::*;
 use crate::syscall::uaccess::{canonical_user_addr, copy_from_user, validate_user_range};
-use crate::syscall::numbers::SYS_EXIT;
 use x86_64::structures::paging::PageTableFlags;
 
 #[no_mangle]
 extern "C" fn syscall_int_handler(frame: &mut SyscallFrame) {
+    // FIX 1: Re-enable interrupts early so syscalls are preemptible and don't block the timer.
+    // SAFETY: We are not holding any IrqSafeMutex locks yet. IrqSafeMutex will temporarily
+    // disable interrupts when acquired and restore them when dropped, preventing deadlocks
+    // from timer interrupts firing while a lock is held.
+    x86_64::instructions::interrupts::enable();
+
+    // FIX 2: Extract `tid` and `pid` by briefly locking and immediately dropping the guards.
+    // WARNING: Do not bind these locks to a variable that spans the `dispatch()` call,
+    // or you will deadlock since IrqSafeMutex/spin::Mutex are not reentrant.
     let tid = match SCHEDULER.lock().get_current() {
         Some(tid) => tid,
         None => panic!("syscall with no current thread"),
     };
-
     let pid = PROCESS_MANAGER.lock().thread(tid).get_owner();
 
     // Special-case syscalls that never return.
@@ -53,7 +59,6 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
         SYS_SLEEP_TICKS => ret(sys_sleep_ticks(args[0])),
         SYS_GETPID => pid.0,
         SYS_GETTID => tid.0,
-
         _ => {
             crate::debugln!("syscall: unknown syscall number {}", frame.rax);
             SysError::Enosys.to_errno()
@@ -70,7 +75,6 @@ fn ret(res: Result<u64, SysError>) -> u64 {
 
 fn usize_from_u64(value: u64) -> Result<usize, SysError> {
     let converted = value as usize;
-
     if converted as u64 == value {
         Ok(converted)
     } else {
@@ -102,7 +106,6 @@ fn sys_write(
     if fd != 1 && fd != 2 {
         return Err(SysError::Ebadf);
     }
-
     if len == 0 {
         return Ok(0);
     }
@@ -116,10 +119,13 @@ fn sys_write(
 
     while written < size {
         let chunk = core::cmp::min(buffer.len(), size - written);
-
+        
+        // `copy_from_user` acquires and releases IrqSafeMutex locks. Because we enabled 
+        // interrupts at the top of the syscall handler, interrupts will be restored to 
+        // ENABLED after this call returns, allowing the timer to preempt us between chunks.
         copy_from_user(pid, addr, &mut buffer[..chunk])?;
+        
         write_chunk(fd, &buffer[..chunk]);
-
         written += chunk;
         addr = addr + chunk as u64;
     }
@@ -152,7 +158,6 @@ fn sys_brk_syscall(pid: PID, new_break: u64) -> Result<u64, SysError> {
     }
 
     let addr = canonical_user_addr(new_break)?;
-
     if addr.as_u64() < USER_SPACE_START || addr.as_u64() > USER_SPACE_END {
         return Err(SysError::Einval);
     }
@@ -166,7 +171,6 @@ fn sys_brk_syscall(pid: PID, new_break: u64) -> Result<u64, SysError> {
 const PROT_READ: u64 = 0x1;
 const PROT_WRITE: u64 = 0x2;
 const PROT_EXEC: u64 = 0x4;
-
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
 
@@ -180,7 +184,6 @@ fn sys_mmap_syscall(
     _offset: u64,
 ) -> Result<u64, SysError> {
     let len = usize_from_u64(len)?;
-
     if len == 0 {
         return Err(SysError::Einval);
     }
@@ -200,15 +203,18 @@ fn sys_mmap_syscall(
         return Err(SysError::Einval);
     }
 
+    // FIX 3: W^X enforcement. Reject mappings that are both writable and executable.
+    if (prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0 {
+        return Err(SysError::Einval);
+    }
+
     let size = align_up_page(len).ok_or(SysError::Einval)?;
 
     let mut pt_flags =
         PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-
     if (prot & PROT_WRITE) != 0 {
         pt_flags |= PageTableFlags::WRITABLE;
     }
-
     if (prot & PROT_EXEC) == 0 {
         pt_flags |= PageTableFlags::NO_EXECUTE;
     }
@@ -225,7 +231,6 @@ fn sys_munmap_syscall(
     len: u64,
 ) -> Result<u64, SysError> {
     let len = usize_from_u64(len)?;
-
     if len == 0 {
         return Err(SysError::Einval);
     }
@@ -244,6 +249,5 @@ fn sys_munmap_syscall(
     }
 
     sys_munmap(pid, addr, size).map_err(|_| SysError::Einval)?;
-
     Ok(0)
 }
