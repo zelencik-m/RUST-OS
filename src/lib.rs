@@ -66,6 +66,9 @@ pub fn init(boot_info: &'static BootInfo) {
 
     mm.init_heap().expect("heap initialization failed");
     *MEMORY_MANAGER.lock() = Some(mm);
+
+    crate::fs::init();
+    
     // unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
 
     let mut pm = PROCESS_MANAGER.lock();
@@ -173,6 +176,7 @@ fn test_heap_allocation() {
 // This is the main "background" thread of your kernel
 extern "C" fn kernel_init_thread() -> ! {
     println!("Kernel init thread started. Running Async Executor...");
+    
     
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));

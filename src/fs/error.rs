@@ -1,10 +1,17 @@
+#![allow(dead_code)]
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsError {
     NotFound,
     AlreadyExists,
     NotDirectory,
     IsDirectory,
-    InvalidOffset,
+    BadFd,
     ReadOnly,
+    InvalidFlags,
+    InvalidPath,
+    NotEmpty,
     Io,
+    NotInitialized,
+    TooManyFiles,
 }

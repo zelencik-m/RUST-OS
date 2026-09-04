@@ -1,4 +1,4 @@
-// src/syscalls/errors.rs
+use crate::fs::FsError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SysError {
@@ -7,6 +7,12 @@ pub enum SysError {
     Ebadf,
     Enomem,
     Enosys,
+    Enoent,
+    Eexist,
+    Enotdir,
+    Eisdir,
+    Eio,
+    Emfile,
 }
 
 impl SysError {
@@ -17,6 +23,29 @@ impl SysError {
             SysError::Ebadf => (-9i64) as u64,
             SysError::Enomem => (-12i64) as u64,
             SysError::Enosys => (-38i64) as u64,
+            SysError::Enoent => (-2i64) as u64,
+            SysError::Eexist => (-17i64) as u64,
+            SysError::Enotdir => (-20i64) as u64,
+            SysError::Eisdir => (-21i64) as u64,
+            SysError::Eio => (-5i64) as u64,
+            SysError::Emfile => (-24i64) as u64,
+        }
+    }
+
+    pub fn from_fs_error(err: FsError) -> Self {
+        match err {
+            FsError::NotFound => SysError::Enoent,
+            FsError::AlreadyExists => SysError::Eexist,
+            FsError::NotDirectory => SysError::Enotdir,
+            FsError::IsDirectory => SysError::Eisdir,
+            FsError::BadFd => SysError::Ebadf,
+            FsError::ReadOnly => SysError::Ebadf,
+            FsError::InvalidFlags => SysError::Einval,
+            FsError::InvalidPath => SysError::Einval,
+            FsError::NotEmpty => SysError::Einval,
+            FsError::Io => SysError::Eio,
+            FsError::NotInitialized => SysError::Eio,
+            FsError::TooManyFiles => SysError::Emfile,
         }
     }
 }

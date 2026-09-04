@@ -1,4 +1,3 @@
-// src/syscalls/dispatch.rs
 use crate::memory::address_space::{is_user_range, USER_SPACE_END, USER_SPACE_START};
 use crate::process::process_manager::{
     get_current_brk, kill_current_thread_and_schedule, sys_brk, sys_mmap_anonymous,
@@ -10,27 +9,27 @@ use crate::scheduler::scheduler::SCHEDULER;
 use crate::syscall::errors::SysError;
 use crate::syscall::frame::SyscallFrame;
 use crate::syscall::numbers::*;
-use crate::syscall::uaccess::{canonical_user_addr, copy_from_user, validate_user_range};
+use crate::syscall::uaccess::{
+    canonical_user_addr, copy_c_string_from_user, copy_from_user, copy_to_user,
+    validate_user_range,
+};
+use crate::fs::{with_vfs, OpenFlags, Path, SeekWhence};
 use x86_64::structures::paging::PageTableFlags;
+
+const PATH_MAX: usize = 4096;
 
 #[no_mangle]
 extern "C" fn syscall_int_handler(frame: &mut SyscallFrame) {
-    // FIX 1: Re-enable interrupts early so syscalls are preemptible and don't block the timer.
-    // SAFETY: We are not holding any IrqSafeMutex locks yet. IrqSafeMutex will temporarily
-    // disable interrupts when acquired and restore them when dropped, preventing deadlocks
-    // from timer interrupts firing while a lock is held.
+    // Re-enable interrupts early so syscalls are preemptible and do not block
+    // the timer while they are doing work.
     x86_64::instructions::interrupts::enable();
 
-    // FIX 2: Extract `tid` and `pid` by briefly locking and immediately dropping the guards.
-    // WARNING: Do not bind these locks to a variable that spans the `dispatch()` call,
-    // or you will deadlock since IrqSafeMutex/spin::Mutex are not reentrant.
     let tid = match SCHEDULER.lock().get_current() {
         Some(tid) => tid,
         None => panic!("syscall with no current thread"),
     };
     let pid = PROCESS_MANAGER.lock().thread(tid).get_owner();
 
-    // Special-case syscalls that never return.
     if frame.rax == SYS_EXIT {
         kill_current_thread_and_schedule(tid);
     }
@@ -49,7 +48,11 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
     ];
 
     match frame.rax {
+        SYS_READ => ret(sys_read(pid, args[0], args[1], args[2])),
         SYS_WRITE => ret(sys_write(pid, args[0], args[1], args[2])),
+        SYS_OPEN => ret(sys_open(pid, args[0], args[1], args[2])),
+        SYS_CLOSE => ret(sys_close(pid, args[0])),
+        SYS_LSEEK => ret(sys_lseek(pid, args[0], args[1] as i64, args[2])),
         SYS_BRK => ret(sys_brk_syscall(pid, args[0])),
         SYS_MMAP => ret(sys_mmap_syscall(
             pid, args[0], args[1], args[2], args[3], args[4], args[5],
@@ -59,6 +62,7 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
         SYS_SLEEP_TICKS => ret(sys_sleep_ticks(args[0])),
         SYS_GETPID => pid.0,
         SYS_GETTID => tid.0,
+        SYS_MKDIR => ret(sys_mkdir(pid, args[0], args[1])),
         _ => {
             crate::debugln!("syscall: unknown syscall number {}", frame.rax);
             SysError::Enosys.to_errno()
@@ -96,16 +100,43 @@ fn sys_sleep_ticks(ticks: u64) -> Result<u64, SysError> {
     Ok(0)
 }
 
-fn sys_write(
+fn process_cwd(pid: PID) -> Path {
+    PROCESS_MANAGER.lock().process(pid).cwd().clone()
+}
+
+fn sys_open(
+    pid: PID,
+    user_path: u64,
+    raw_flags: u64,
+    _mode: u64,
+) -> Result<u64, SysError> {
+    let path = copy_c_string_from_user(pid, user_path, PATH_MAX)?;
+    let flags = OpenFlags::from_raw(raw_flags).map_err(SysError::from_fs_error)?;
+    let cwd = process_cwd(pid);
+
+    let file = with_vfs(|vfs| vfs.open(&cwd, &path, flags))
+        .map_err(SysError::from_fs_error)?;
+
+    let mut pm = PROCESS_MANAGER.lock();
+    pm.process_mut(pid)
+        .alloc_fd(file)
+        .map_err(SysError::from_fs_error)
+}
+
+fn sys_close(pid: PID, fd: u64) -> Result<u64, SysError> {
+    let mut pm = PROCESS_MANAGER.lock();
+    pm.process_mut(pid)
+        .close_fd(fd)
+        .map_err(SysError::from_fs_error)?;
+    Ok(0)
+}
+
+fn sys_read(
     pid: PID,
     fd: u64,
     user_ptr: u64,
     len: u64,
 ) -> Result<u64, SysError> {
-    // Only stdout/stderr for now.
-    if fd != 1 && fd != 2 {
-        return Err(SysError::Ebadf);
-    }
     if len == 0 {
         return Ok(0);
     }
@@ -113,44 +144,111 @@ fn sys_write(
     let size = usize_from_u64(len)?;
     let src = validate_user_range(user_ptr, size)?;
 
-    let mut written = 0usize;
+    let mut total = 0usize;
     let mut addr = src;
     let mut buffer = [0u8; 512];
 
-    while written < size {
-        let chunk = core::cmp::min(buffer.len(), size - written);
-        
-        // `copy_from_user` acquires and releases IrqSafeMutex locks. Because we enabled 
-        // interrupts at the top of the syscall handler, interrupts will be restored to 
-        // ENABLED after this call returns, allowing the timer to preempt us between chunks.
-        copy_from_user(pid, addr, &mut buffer[..chunk])?;
-        
-        write_chunk(fd, &buffer[..chunk]);
-        written += chunk;
-        addr = addr + chunk as u64;
+    while total < size {
+        let chunk = core::cmp::min(buffer.len(), size - total);
+
+        let n = {
+            let mut pm = PROCESS_MANAGER.lock();
+            pm.process_mut(pid)
+                .file_mut(fd)
+                .map_err(SysError::from_fs_error)?
+                .read(&mut buffer[..chunk])
+                .map_err(SysError::from_fs_error)?
+        };
+
+        if n == 0 {
+            break;
+        }
+
+        copy_to_user(pid, addr, &buffer[..n])?;
+        total += n;
+        addr = addr + n as u64;
+
+        if n < chunk {
+            break;
+        }
     }
 
-    Ok(written as u64)
+    Ok(total as u64)
 }
 
-fn write_chunk(fd: u64, bytes: &[u8]) {
-    // Fast path for valid UTF-8.
-    if let Ok(s) = core::str::from_utf8(bytes) {
-        // Print to serial so you see it in your terminal!
-        crate::serial_print!("{}", s);
-        crate::print!("{}", s);
-        return;
+fn sys_write(
+    pid: PID,
+    fd: u64,
+    user_ptr: u64,
+    len: u64,
+) -> Result<u64, SysError> {
+    if len == 0 {
+        return Ok(0);
     }
 
-    // Fallback: best-effort byte output.
-    for &byte in bytes {
-        crate::serial_print!("{}", byte as char);
-        crate::print!("{}", byte as char);
+    let size = usize_from_u64(len)?;
+    let src = validate_user_range(user_ptr, size)?;
+
+    let mut total = 0usize;
+    let mut addr = src;
+    let mut buffer = [0u8; 512];
+
+    while total < size {
+        let chunk = core::cmp::min(buffer.len(), size - total);
+        copy_from_user(pid, addr, &mut buffer[..chunk])?;
+
+        let n = {
+            let mut pm = PROCESS_MANAGER.lock();
+            pm.process_mut(pid)
+                .file_mut(fd)
+                .map_err(SysError::from_fs_error)?
+                .write(&buffer[..chunk])
+                .map_err(SysError::from_fs_error)?
+        };
+
+        total += n;
+        addr = addr + n as u64;
+
+        if n < chunk {
+            break;
+        }
     }
+
+    Ok(total as u64)
+}
+
+fn sys_lseek(
+    pid: PID,
+    fd: u64,
+    offset: i64,
+    whence_raw: u64,
+) -> Result<u64, SysError> {
+    let whence = SeekWhence::from_raw(whence_raw)
+        .map_err(SysError::from_fs_error)?;
+
+    let mut pm = PROCESS_MANAGER.lock();
+    pm.process_mut(pid)
+        .file_mut(fd)
+        .map_err(SysError::from_fs_error)?
+        .seek(offset, whence)
+        .map_err(SysError::from_fs_error)
+}
+
+fn sys_mkdir(
+    pid: PID,
+    user_path: u64,
+    _mode: u64,
+) -> Result<u64, SysError> {
+    let path = copy_c_string_from_user(pid, user_path, PATH_MAX)?;
+    let cwd = process_cwd(pid);
+
+    with_vfs(|vfs| vfs.mkdir(&cwd, &path))
+        .map_err(SysError::from_fs_error)?;
+
+    Ok(0)
 }
 
 fn sys_brk_syscall(pid: PID, new_break: u64) -> Result<u64, SysError> {
-    // brk(0) queries the current break.
     if new_break == 0 {
         return get_current_brk(pid)
             .map(|v| v.as_u64())
@@ -188,22 +286,18 @@ fn sys_mmap_syscall(
         return Err(SysError::Einval);
     }
 
-    // For now, only anonymous mappings are supported.
     if (flags & MAP_ANONYMOUS) == 0 {
         return Err(SysError::Einval);
     }
 
-    // Fixed mappings are not supported yet.
     if (flags & MAP_FIXED) != 0 {
         return Err(SysError::Einval);
     }
 
-    // PROT_NONE is not supported yet.
     if (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0 {
         return Err(SysError::Einval);
     }
 
-    // FIX 3: W^X enforcement. Reject mappings that are both writable and executable.
     if (prot & PROT_WRITE) != 0 && (prot & PROT_EXEC) != 0 {
         return Err(SysError::Einval);
     }
@@ -237,7 +331,6 @@ fn sys_munmap_syscall(
 
     let addr = canonical_user_addr(addr)?;
 
-    // munmap address must be page-aligned.
     if (addr.as_u64() & 0xFFF) != 0 {
         return Err(SysError::Einval);
     }

@@ -25,6 +25,13 @@ use x86_64::VirtAddr;
 use rust_os::memory::vma::VmaKind; // Make sure this path matches your VmaKind import
 use rust_os::process::PID;
 
+use rust_os::fs::{
+    with_vfs,
+    OpenFlags,
+    SeekWhence,
+    FileType,
+};
+
 // src/main.rs (inside `kernel_main`)
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rust_os::init(boot_info);
@@ -57,6 +64,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         debugln!(">>> creating syscall_test thread");
         let tid_sys = process_manager::create_thread(PID(0), syscall_test);
         debugln!(">>> syscall_test created TID({:?})", tid_sys.0);
+
+        debugln!(">>> creating vfs_test thread");
+        let tid_sys = process_manager::create_thread(PID(0), vfs_test);
+        debugln!(">>> vfs_test created TID({:?})", tid_sys.0);
 
         debugln!(">>> entering hlt_loop");
     });
@@ -543,6 +554,121 @@ extern "C" fn syscall_test() -> ! {
     serial_println!("[syscall_test] User thread created TID({:?})", utid.0);
 
     // Keep the test thread alive so the kernel doesn't halt
+    loop {
+        sleep(50);
+    }
+}
+
+extern "C" fn vfs_test() -> ! {
+    serial_println!("[vfs_test] starting...");
+
+    with_vfs(|vfs| {
+        // ------------------------------------------------------------
+        // 1. Create a directory
+        // ------------------------------------------------------------
+        serial_println!("[vfs_test] mkdir /tmp");
+        match vfs.mkdir(&rust_os::fs::Path::root(), "/tmp") {
+            Ok(()) => {}
+            Err(rust_os::fs::FsError::AlreadyExists) => {
+                // Fine if the test is run more than once.
+            }
+            Err(e) => {
+                serial_println!("[vfs_test] mkdir failed: {:?}", e);
+                return Err(e);
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 2. Create and open a file
+        // ------------------------------------------------------------
+        serial_println!("[vfs_test] open /tmp/hello.txt");
+
+        let flags =
+            OpenFlags::from_raw(
+                rust_os::fs::file::O_RDWR
+                    | rust_os::fs::file::O_CREAT
+                    | rust_os::fs::file::O_TRUNC,
+            )?;
+
+        let mut file = vfs.open(
+            &rust_os::fs::Path::root(),
+            "/tmp/hello.txt",
+            flags,
+        )?;
+
+        // ------------------------------------------------------------
+        // 3. Write
+        // ------------------------------------------------------------
+        let message = b"Hello from RamFS!";
+
+        serial_println!(
+            "[vfs_test] writing {} bytes",
+            message.len()
+        );
+
+        let written = file.write(message)?;
+
+        assert_eq!(written, message.len());
+
+        // ------------------------------------------------------------
+        // 4. Seek back to beginning
+        // ------------------------------------------------------------
+        let new_offset = file.seek(0, SeekWhence::Set)?;
+
+        assert_eq!(new_offset, 0);
+
+        // ------------------------------------------------------------
+        // 5. Read it back
+        // ------------------------------------------------------------
+        let mut buffer = [0u8; 64];
+
+        let read = file.read(&mut buffer)?;
+
+        assert_eq!(read, message.len());
+        assert_eq!(&buffer[..read], message);
+
+        serial_println!(
+            "[vfs_test] read back: {}",
+            core::str::from_utf8(&buffer[..read]).unwrap()
+        );
+
+        // ------------------------------------------------------------
+        // 6. Stat
+        // ------------------------------------------------------------
+        let stat = file.stat()?;
+
+        assert_eq!(stat.file_type, FileType::Regular);
+        assert_eq!(stat.size, message.len() as u64);
+
+        serial_println!(
+            "[vfs_test] stat: size={}, type={:?}",
+            stat.size,
+            stat.file_type
+        );
+
+        // ------------------------------------------------------------
+        // 7. Directory listing
+        // ------------------------------------------------------------
+        let entries = vfs.readdir(
+            &rust_os::fs::Path::root(),
+            "/tmp",
+        )?;
+
+        let found = entries.iter().any(|entry| {
+            entry.name == "hello.txt"
+                && entry.file_type == FileType::Regular
+        });
+
+        assert!(found);
+
+        serial_println!("[vfs_test] /tmp contains hello.txt");
+
+        Ok(())
+    })
+    .expect("[vfs_test] VFS operation failed");
+
+    serial_println!("[vfs_test] PASSED");
+
     loop {
         sleep(50);
     }

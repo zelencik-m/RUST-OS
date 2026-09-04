@@ -1,4 +1,6 @@
-// src/syscalls/uaccess.rs
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::memory::address_space::is_user_range;
 use crate::memory::memory_manager::{FaultAction, MEMORY_MANAGER};
 use crate::memory::vma::VmaKind;
@@ -14,8 +16,6 @@ use x86_64::VirtAddr;
 /// non-canonical addresses, and user input must never panic the kernel.
 pub fn canonical_user_addr(addr: u64) -> Result<VirtAddr, SysError> {
     let high = addr >> 48;
-    // 4-level paging canonical addresses have bits 48..63 all zero
-    // or all one.
     if high != 0 && high != 0xffff {
         return Err(SysError::Efault);
     }
@@ -23,11 +23,6 @@ pub fn canonical_user_addr(addr: u64) -> Result<VirtAddr, SysError> {
 }
 
 /// Validate a user address range.
-///
-/// This checks:
-/// - canonical start address,
-/// - overflow,
-/// - that the whole range lies inside your user P4 slot.
 pub fn validate_user_range(start: u64, size: usize) -> Result<VirtAddr, SysError> {
     let addr = canonical_user_addr(start)?;
     if size == 0 {
@@ -60,10 +55,38 @@ pub fn copy_to_user(
     copy_user_internal(pid, dst, src.as_ptr() as *mut u8, src.len(), true)
 }
 
-// FIX 5: Added note about defense-in-depth bounds checking.
-// Note: `copy_user_internal` re-validates the user range via `is_user_range` even if
-// the caller (e.g. `sys_write`) already called `validate_user_range`. This is intentional
-// defense-in-depth to ensure memory safety even if a future syscall forgets the initial check.
+/// Copy a NUL-terminated string from userspace.
+///
+/// Paths are infrequent enough that the byte-at-a-time implementation is a
+/// worthwhile simplicity tradeoff here: it stops exactly at NUL and never
+/// speculatively reads the page after the string.
+pub fn copy_c_string_from_user(
+    pid: PID,
+    src: u64,
+    max_len: usize,
+) -> Result<String, SysError> {
+    if max_len == 0 {
+        return Err(SysError::Einval);
+    }
+
+    let base = canonical_user_addr(src)?;
+    let mut bytes = Vec::new();
+
+    for i in 0..max_len {
+        let mut byte = [0u8; 1];
+        copy_from_user(pid, base + i as u64, &mut byte)?;
+
+        if byte[0] == 0 {
+            return String::from_utf8(bytes).map_err(|_| SysError::Einval);
+        }
+
+        bytes.push(byte[0]);
+    }
+
+    // No terminator within the allowed path length.
+    Err(SysError::Einval)
+}
+
 fn copy_user_internal(
     pid: PID,
     addr: VirtAddr,
@@ -82,8 +105,7 @@ fn copy_user_internal(
 
     let mut offset = 0usize;
 
-    // Lock order:
-    // ProcessManager -> MemoryManager
+    // Existing kernel convention: ProcessManager -> MemoryManager.
     let mut pm = PROCESS_MANAGER.lock();
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard
@@ -104,7 +126,6 @@ fn copy_user_internal(
             len - offset,
         );
 
-        // Demand-map the page if necessary.
         if space.translate(mm.physical_memory_offset, cur).is_none() {
             match mm.handle_page_fault(space, cur) {
                 FaultAction::Resolved => {}
@@ -117,7 +138,6 @@ fn copy_user_internal(
             }
         }
 
-        // Check VMA permissions.
         let vma = space
             .get_vma(cur)
             .ok_or(SysError::Efault)?;
