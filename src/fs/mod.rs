@@ -3,6 +3,7 @@
 pub mod error;
 pub mod file;
 pub mod inode;
+pub mod ramfs;
 
 pub use error::FsError;
 pub use file::{File, OpenFlags, SeekWhence};
