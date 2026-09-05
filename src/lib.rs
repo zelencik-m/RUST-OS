@@ -67,7 +67,7 @@ pub fn init(boot_info: &'static BootInfo) {
     mm.init_heap().expect("heap initialization failed");
     *MEMORY_MANAGER.lock() = Some(mm);
 
-    crate::fs::init();
+    crate::fs::init().expect("filesystem initialization failed");
     
     // unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
 
