@@ -1,3 +1,5 @@
+// src/fs/inode.rs
+
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

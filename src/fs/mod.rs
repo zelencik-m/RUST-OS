@@ -1,3 +1,5 @@
+// src/fs/mod.rs
+
 #![allow(dead_code)]
 
 pub mod error;

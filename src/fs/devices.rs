@@ -1,3 +1,5 @@
+// src/fs/devices.rs
+
 use alloc::sync::Arc;
 
 use super::error::FsError;
