@@ -18,6 +18,7 @@ use crate::debugln;
 use crate::memory::address_space::AddressSpace;
 use crate::memory::memory_manager::{FaultAction, MEMORY_MANAGER, Oom};
 use crate::memory::vma::VmaKind;
+use crate::process::elf_loader::load_elf;
 use crate::process::thread::{self, TID};
 use crate::process::PID;
 use crate::scheduler::scheduler::SCHEDULER;
@@ -137,6 +138,36 @@ pub fn create_user_process(name: String) -> PID {
         AddressSpace::new(&mut mm.frame_allocator, mm.physical_memory_offset)
     };
     PROCESS_MANAGER.lock().create_user_process_with_space(PID(0), name, space)
+}
+
+/// Create a user process, load an ELF image into its private address space,
+/// and enqueue a user thread at the ELF entry point.
+pub fn spawn_elf(name: String, elf_bytes: &[u8]) -> Result<(PID, TID), Oom> {
+    let pid = create_user_process(name);
+
+    let entry_point = {
+        let mut pm = PROCESS_MANAGER.lock();
+        let space = pm
+            .process_mut(pid)
+            .address_space
+            .as_mut()
+            .expect("new user process has no address space");
+
+        let mut mm = MEMORY_MANAGER.lock();
+        let mm = mm.as_mut().expect("MemoryManager not initialized");
+        load_elf(elf_bytes, space, mm)
+    };
+
+    match entry_point {
+        Ok(entry_point) => {
+            let tid = create_user_thread(pid, entry_point);
+            Ok((pid, tid))
+        }
+        Err(error) => {
+            destroy_process(pid);
+            Err(error)
+        }
+    }
 }
 
 pub fn map_user_region_for_process(

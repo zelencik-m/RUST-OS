@@ -82,9 +82,6 @@ pub fn init(boot_info: &'static BootInfo) {
     let tid_init = process_manager::create_thread(kpid, kernel_init_thread);
 
     let idle_tid = process_manager::create_idle_thread(crate::process::idle::idle_loop);
-    x86_64::instructions::interrupts::enable();
-
-
 }
 
 pub trait Testable {
@@ -198,4 +195,3 @@ async fn example_task() {
     let number = async_number().await;
     println!("async number: {}", number);
 }
-
