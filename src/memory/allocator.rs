@@ -1,5 +1,3 @@
-// src/memory/allocator.rs
-
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 use buddy_allocator::BuddyAllocator;

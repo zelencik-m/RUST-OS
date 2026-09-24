@@ -1,5 +1,3 @@
-// src/sync.rs
-
 use spin::{Mutex, MutexGuard};
 use x86_64::instructions::interrupts;
 
@@ -12,21 +10,17 @@ pub struct IrqSafeMutexGuard<'a, T> {
     interrupts_were_enabled: bool,
 }
 
-// Implement Deref and DerefMut so you can use the guard like a normal reference
 impl<T> IrqSafeMutex<T> {
     pub const fn new(value: T) -> Self {
         IrqSafeMutex(Mutex::new(value))
     }
 
     pub fn lock(&self) -> IrqSafeMutexGuard<'_, T> {
-        // 1. Check if interrupts are currently enabled BEFORE we disable them.
         let interrupts_were_enabled = interrupts::are_enabled();
 
-        // 2. Disable interrupts.
         interrupts::disable();
 
-        // 3. Acquire the spin lock. 
-        // Because interrupts are off, no timer interrupt can interrupt us here.
+        // Disable interrupts before locking to prevent interrupt-handler deadlocks.
         let guard = self.0.lock();
 
         IrqSafeMutexGuard {
@@ -49,13 +43,11 @@ impl<T> core::ops::DerefMut for IrqSafeMutexGuard<'_, T> {
     }
 }
 
-// The magic happens here: when the guard goes out of scope, this runs.
 impl<T> Drop for IrqSafeMutexGuard<'_, T> {
     fn drop(&mut self) {
-        // 1. Release the spin lock by dropping the inner guard
+        // Release the lock before restoring interrupts.
         self.inner.take(); 
 
-        // 2. If interrupts were enabled BEFORE we locked, re-enable them.
         if self.interrupts_were_enabled {
             interrupts::enable();
         }

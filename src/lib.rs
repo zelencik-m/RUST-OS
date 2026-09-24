@@ -1,5 +1,3 @@
-// src/lib.rs
-
 #![no_std]
 #![cfg_attr(test, no_main)]
 #![feature(custom_test_frameworks)]
@@ -69,16 +67,13 @@ pub fn init(boot_info: &'static BootInfo) {
 
     crate::fs::init().expect("filesystem initialization failed");
     
-    // unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
-
     let mut pm = PROCESS_MANAGER.lock();
     
-    // 1. Bootstrap the kernel process (PID 0)
+    // Bootstrap the kernel process (PID 0).
     let kpid = pm.init_kernel_process();
 
     drop(pm);
 
-    // 2. Create the main kernel thread that will run the async executor
     let tid_init = process_manager::create_thread(kpid, kernel_init_thread);
 
     let idle_tid = process_manager::create_idle_thread(crate::process::idle::idle_loop);
@@ -170,7 +165,6 @@ fn test_heap_allocation() {
     assert_eq!(*x, 42);
 }
 
-// This is the main "background" thread of your kernel
 extern "C" fn kernel_init_thread() -> ! {
     println!("Kernel init thread started. Running Async Executor...");
     
@@ -178,11 +172,6 @@ extern "C" fn kernel_init_thread() -> ! {
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
-    
-    // This blocks forever, running async tasks.
-    // If you want thread_a and thread_b to still run, you would need to 
-    // integrate the scheduler with the executor (e.g., yielding here).
-    
     
     executor.run();
 }

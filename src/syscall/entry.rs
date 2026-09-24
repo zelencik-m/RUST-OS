@@ -1,5 +1,3 @@
-// src/syscalls/entry.rs
-
 use core::arch::global_asm;
 
 global_asm!(
@@ -9,10 +7,7 @@ global_asm!(
     // System V ABI requires DF = 0.
     "cld",
 
-    // Save registers.
-    //
-    // IMPORTANT:
-    // This push order must match SyscallFrame exactly.
+    // Keep this push order in sync with SyscallFrame.
     "push rax",
     "push rdi",
     "push rsi",
@@ -29,12 +24,10 @@ global_asm!(
     "push r14",
     "push r15",
 
-    // Pass &mut SyscallFrame to Rust.
     "mov rdi, rsp",
 
     "call syscall_int_handler",
 
-    // Restore registers in reverse order.
     "pop r15",
     "pop r14",
     "pop r13",

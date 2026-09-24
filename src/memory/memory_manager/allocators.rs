@@ -1,5 +1,3 @@
-// src/memory/memory_manager/allocators.rs
-
 use super::MemoryManager;
 use super::vmm::Oom;
 use crate::memory::address_space::AddressSpace;
@@ -16,7 +14,7 @@ impl MemoryManager {
 
         let start = space.find_free_region_top_down(total_size as u64).ok_or(Oom)?;
 
-        // 1. Register Guard Page (Bottom-most page)
+        // Reserve the bottom page as a guard.
         space.vmas.push(VmArea {
             start,
             size: 4096,
@@ -24,7 +22,6 @@ impl MemoryManager {
             kind: VmaKind::Guard,
         });
 
-        // 2. Map Stack Pages
         let stack_start = start + 4096u64;
         let stack_size = STACK_PAGES * 4096;
         
@@ -34,7 +31,7 @@ impl MemoryManager {
             VmaKind::Stack
         )?;
 
-        // 3. Return initial RSP (Top of the stack)
+        // The initial stack pointer is at the top of the stack.
         Ok(stack_start + stack_size as u64)
     }
 

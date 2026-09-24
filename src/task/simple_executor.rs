@@ -1,5 +1,3 @@
-// src/task/simple_example.rs
-
 use super::Task;
 use alloc::collections::VecDeque;
 
@@ -45,7 +43,7 @@ impl SimpleExecutor {
             let waker = dummy_waker();
             let mut context = Context::from_waker(&waker);
             match task.poll(&mut context) {
-                Poll::Ready(()) => {} // task done
+                Poll::Ready(()) => {}
                 Poll::Pending => self.task_queue.push_back(task),
             }
         }

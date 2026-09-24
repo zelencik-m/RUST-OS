@@ -1,13 +1,3 @@
-// tests/buddy_allocator.rs
-//
-// Integration tests for BuddyAllocator, modeled on tests/basic_boot.rs.
-//
-// NOTE: adjust the `use` paths below to match where BuddyAllocator/Locked
-// actually live in your crate (e.g. `rust_os::allocator::buddy::{...}`).
-// `Locked` is assumed to expose `pub const fn new(inner: A) -> Self` and
-// `pub fn lock(&self) -> impl DerefMut<Target = A>` as in the "Writing OS
-// in Rust" allocator module.
-
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
@@ -37,10 +27,7 @@ fn panic(info: &PanicInfo) -> ! {
 // spot regardless of test name length.
 const NAME_COL: usize = 52;
 
-/// Local test runner for this file only (the `#![test_runner(...)]` above
-/// only affects this binary, so `basic_boot.rs` etc. are untouched). Prints
-/// a banner, runs each test, then a summary + exit -- adjust the
-/// `rust_os::exit_qemu` / `QemuExitCode` names below if yours differ.
+/// Runs the allocator tests and reports the result to QEMU.
 pub fn test_runner(tests: &[&dyn Fn()]) {
     serial_println!();
     serial_println!("┌────────────────────────────────────────────────────┐");
@@ -66,7 +53,6 @@ fn section(name: &str) {
 }
 
 /// Prints the padded test name, runs `body`, then prints "[ok]".
-/// Keeps every test's own code free of formatting boilerplate.
 macro_rules! run_test {
     ($name:expr, $body:block) => {{
         serial_print!("{:<width$}", concat!($name, "..."), width = NAME_COL);
@@ -75,9 +61,7 @@ macro_rules! run_test {
     }};
 }
 
-// Small, dedicated heap just for these tests. 2048 bytes / 16-byte min
-// block = 128 order-0 blocks, which keeps stack usage for pointer arrays
-// (used in the exhaustion/coalescing tests) small and safe.
+// 128 minimum-size blocks keep the exhaustion tests' pointer arrays small.
 const HEAP_SIZE: usize = 2048;
 
 #[repr(align(4096))]

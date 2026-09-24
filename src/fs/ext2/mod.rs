@@ -1,5 +1,3 @@
-// src/fs/ext2/mod.rs
-
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -1019,7 +1017,6 @@ impl Ext2State {
     }
 }
 
-// Keep a couple of on-disk constants close to the filesystem implementation.
 #[allow(dead_code)]
 const _EXT2_MAGIC: u16 = EXT2_SUPER_MAGIC;
 #[allow(dead_code)]

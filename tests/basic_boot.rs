@@ -1,5 +1,3 @@
-// tests/basic_boot.rs
-
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
@@ -9,7 +7,7 @@
 use core::panic::PanicInfo;
 use rust_os::{println, serial_print, serial_println};
 
-#[no_mangle] // don't mangle the name of this function
+#[no_mangle]
 pub extern "C" fn _start() -> ! {
     test_main();
 
@@ -31,6 +29,6 @@ fn test_println() {
 #[test_case]
 fn test_vga_buffer_content() {
     serial_print!("test_vga_buffer_content... ");
-    // Add actual VGA buffer assertions here if needed
+    // Placeholder: no buffer contents are asserted yet.
     serial_println!("[ok]");
 }

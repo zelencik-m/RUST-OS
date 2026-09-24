@@ -1,5 +1,3 @@
-// src/vga_buffer.rs
-
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub static KERNEL_CR3_PHYS: AtomicU64 = AtomicU64::new(0);

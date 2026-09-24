@@ -1,5 +1,3 @@
-// src/fs/ramfs.rs
-
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;

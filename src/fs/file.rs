@@ -1,5 +1,3 @@
-// src/fs/file.rs
-
 use super::error::FsError;
 use super::inode::{FileStat, FileType, InodeRef};
 

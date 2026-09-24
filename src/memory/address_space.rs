@@ -1,5 +1,3 @@
-// src/memory/address_space.rs
-
 use core::ptr;
 use alloc::vec::Vec;
 use x86_64::{
@@ -14,10 +12,7 @@ use x86_64::PhysAddr;
 use crate::memory::paging::active_level_4_table;
 use crate::memory::vma::VmArea;
 
-/// Temporary compatibility layout:
-///
-/// We keep low-half kernel mappings shared, because the kernel is not fully
-/// higher-half yet. User memory is isolated in a dedicated P4 slot.
+/// Low-half kernel mappings remain shared until the kernel moves higher-half.
 pub const USER_P4_START: usize = 255;
 pub const USER_P4_END: usize = 256; // exclusive
 
@@ -71,10 +66,8 @@ impl AddressSpace {
         let p4: &mut PageTable = unsafe { &mut *p4_ptr };
         let kernel_p4 = unsafe { active_level_4_table(off) };
 
-        // Compatibility mode:
-        //
-        // Clone low-half kernel mappings too, because the kernel image/statics
-        // are still low-half. But DO NOT clone the private user P4 slot.
+        // The kernel image and statics still use low-half mappings; keep the
+        // private user P4 slot separate.
         for i in 0..KERNEL_P4_START {
             if i >= USER_P4_START && i < USER_P4_END {
                 continue;
@@ -95,8 +88,8 @@ impl AddressSpace {
         }
     }
 
-    /// Build a mapper for an address space that may or may not be active.
-    /// Tied to &mut self to prevent multiple simultaneous mutable borrows.
+    /// Build a mapper for this address space, active or not.
+    /// The mutable borrow prevents simultaneous mappers for the same space.
     pub unsafe fn mapper(&mut self, off: VirtAddr) -> OffsetPageTable<'_> {
         let p4_ptr = (off + self.p4_frame.start_address().as_u64()).as_mut_ptr();
         let p4: &mut PageTable = &mut *p4_ptr;

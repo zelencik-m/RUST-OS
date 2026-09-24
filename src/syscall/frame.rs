@@ -1,5 +1,3 @@
-// src/syscalls/frame.rs
-
 #[repr(C)]
 #[derive(Debug)]
 pub struct SyscallFrame {

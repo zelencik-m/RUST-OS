@@ -1,5 +1,3 @@
-// src/task/executor.rs
-
 use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc, task::Wake};
 use core::task::{Context, Poll, Waker};
@@ -32,13 +30,12 @@ impl Executor {
     pub fn run(&mut self) -> ! {
         loop {
             self.run_ready_tasks();
-            // yield_now();
             self.sleep_if_idle();
         }
     }
 
     fn run_ready_tasks(&mut self) {
-        // destructure `self` to avoid borrow checker errors
+        // Borrow the task map and waker cache separately.
         let Self {
             tasks,
             task_queue,
@@ -56,7 +53,6 @@ impl Executor {
             let mut context = Context::from_waker(waker);
             match task.poll(&mut context) {
                 Poll::Ready(()) => {
-                    // task done -> remove it and its cached waker
                     tasks.remove(&task_id);
                     waker_cache.remove(&task_id);
                 }

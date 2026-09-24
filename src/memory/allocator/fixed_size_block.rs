@@ -1,5 +1,3 @@
-// src/allocator/fixed_size_block.rs
-
 use super::Locked;
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::{
@@ -9,8 +7,7 @@ use core::{
 
 /// The block sizes to use.
 ///
-/// The sizes must each be power of 2 because they are also used as
-/// the block alignment (alignments must be always powers of 2).
+/// Block sizes must be powers of two because each size is also its alignment.
 const BLOCK_SIZES: &[usize] = &[8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 /// Choose an appropriate block size for the given layout.
@@ -71,9 +68,7 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                         node as *mut ListNode as *mut u8
                     }
                     None => {
-                        // no block exists in list => allocate new block
                         let block_size = BLOCK_SIZES[index];
-                        // only works if all block sizes are a power of 2
                         let block_align = block_size;
                         let layout = Layout::from_size_align(block_size, block_align).unwrap();
                         allocator.fallback_alloc(layout)
@@ -91,7 +86,7 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
                 let new_node = ListNode {
                     next: allocator.list_heads[index].take(),
                 };
-                // verify that block has size and alignment required for storing node
+                // The freed block must fit and align the intrusive list node.
                 assert!(mem::size_of::<ListNode>() <= BLOCK_SIZES[index]);
                 assert!(mem::align_of::<ListNode>() <= BLOCK_SIZES[index]);
                 let new_node_ptr = ptr as *mut ListNode;

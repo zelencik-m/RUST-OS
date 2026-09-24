@@ -1,5 +1,3 @@
-// src/process/process_manager/manager.rs
-
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;

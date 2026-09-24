@@ -1,5 +1,3 @@
-// src/process/thread.rs
-
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::alloc::Layout;
 use core::arch::global_asm;
@@ -79,33 +77,18 @@ impl Thread {
         let stack_top = (raw as u64 + stack_size as u64) & !0xF;
         let entry_addr = entry as usize as u64;
 
-        // Fake initial stack frame, laid out to match switch_context's
-        // push/pop order in reverse (since switch_context pops back-to-front):
-        //
-        //   switch_context pushes:  rflags, rbp, rbx, r12, r13, r14, r15
-        //   switch_context pops:    r15, r14, r13, r12, rbx, rbp, rflags
-        //   then: ret  (pops the fake "return address" -> entry_addr)
-        //
-        // So from stack_top downward, memory must contain (high -> low):
-        //   [stack_top - 8]  = entry_addr   (consumed by `ret`)
-        //   [stack_top - 16] = rflags       (consumed by `popfq`)
-        //   [stack_top - 24] = rbp
-        //   [stack_top - 32] = rbx
-        //   [stack_top - 40] = r12
-        //   [stack_top - 48] = r13
-        //   [stack_top - 56] = r14
-        //   [stack_top - 64] = r15
-        //
-        // NOTE on the preemption model (fix 1): a brand-new thread's fake
-        // frame deliberately has NO interrupt frame underneath it and skips
-        // straight to `entry_addr` via `ret`. That's correct as long as the
-        // timer-interrupt entry stub calls `schedule()` as an ordinary
-        // (non-tail) function call, on the interrupted thread's own kernel
-        // stack, through a plain interrupt gate with no IST — see the
-        // `switch_context` doc comment below for the full contract. A new
-        // thread never needs to `iretq` out of an interrupt it was never in,
-        // so it can start directly at `entry_addr` with only the
-        // callee-saved registers `switch_context` expects to pop.
+        // switch_context pops these slots in reverse order, then returns to
+        // entry_addr. A new thread has no interrupt frame; schedule() must run
+        // on the interrupted thread's kernel stack through a plain gate (no IST).
+        // From stack_top downward:
+        // [stack_top - 8]  = entry_addr
+        // [stack_top - 16] = rflags
+        // [stack_top - 24] = rbp
+        // [stack_top - 32] = rbx
+        // [stack_top - 40] = r12
+        // [stack_top - 48] = r13
+        // [stack_top - 56] = r14
+        // [stack_top - 64] = r15
         let entry_slot  = stack_top - 8;
         let rflags_slot = stack_top - 16;
 
@@ -135,10 +118,11 @@ impl Thread {
 
         let stack_top = (raw as u64 + stack_size as u64) & !0xF;
 
-        // Stack layout for user thread trampoline (High to Low):
-        // [stack_top - 8]  = user_stack_top (popped into rsi)
-        // [stack_top - 16] = entry_point (popped into rdi)
-        // [stack_top - 24] = user_thread_trampoline (popped by ret in switch_context)
+        // From stack_top downward; switch_context returns to the trampoline,
+        // which pops entry_point and user_stack_top into rdi and rsi.
+        // [stack_top - 8]  = user_stack_top
+        // [stack_top - 16] = entry_point
+        // [stack_top - 24] = user_thread_trampoline
         // [stack_top - 32] = rflags
         // [stack_top - 40] = rbp
         // [stack_top - 48] = rbx
@@ -247,8 +231,6 @@ extern "C" {
 //                  +----------------------+---------+
 
 impl Thread {
-    // Existing methods remain the same, but we add/update transitions.
-
     pub fn set_to_ready(&mut self) {
         assert!(
             matches!(self.state, ThreadState::Blocked | ThreadState::Sleeping | ThreadState::Waiting),

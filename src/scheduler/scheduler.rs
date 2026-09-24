@@ -1,5 +1,3 @@
-// src/scheduler/scheduler.rs
-
 use alloc::collections::VecDeque;
 use crate::debugln;
 use crate::process::thread::TID;
@@ -28,8 +26,6 @@ pub struct Scheduler {
     pub tick_count: u64,
     pub sleep_queue: VecDeque<SleepThread>,
     pub idle_thread: Option<TID>,
-    // Optionally: the kernel context could stay in ProcessManager,
-    // but if you prefer you can move it here as well.
 }
 
 impl Scheduler {
@@ -48,8 +44,6 @@ impl Scheduler {
     }
 
     pub fn next_runnable(&mut self) -> Option<TID> {
-        // Optionally filter out TIDs that are no longer valid.
-        // For now, just pop front.
         self.runnables.pop_front()
     }
 
@@ -65,8 +59,6 @@ impl Scheduler {
         self.idle_thread = Some(tid);
     }
 
-    // You may also want a method to remove a specific TID from runnables
-    // if a thread is destroyed while still in the queue.
     pub fn remove_from_runnables(&mut self, tid: TID) {
         self.runnables.retain(|&x| x != tid);
     }
@@ -89,7 +81,6 @@ impl Scheduler {
                 if self.tick_count >= sleep_thread.wakeup_tick
                     && pm.get_thread_state(sleep_thread.tid) == ThreadState::Sleeping
                 {
-                    // Wake the thread: set state to Ready and add to run queue
                     pm.wake_thread(sleep_thread.tid);
                     drop(pm);
                     self.add_runnable(sleep_thread.tid);

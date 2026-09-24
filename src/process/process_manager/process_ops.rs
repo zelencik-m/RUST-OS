@@ -1,5 +1,3 @@
-// src/process/process_manager/process_ops.rs
-
 use alloc::string::String;
 use alloc::vec::Vec;
 use x86_64::registers::control::Cr3;
@@ -90,7 +88,7 @@ pub fn destroy_process(&mut self, pid: PID) {
                 let (_, flags) = Cr3::read();
                 let current_cr3 = Cr3::read().0;
                 
-                // If we are somehow destroying the currently active process, switch CR3 first
+                // Switch away before freeing the active page tables.
                 if current_cr3 == space.cr3() {
                     unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
                 }

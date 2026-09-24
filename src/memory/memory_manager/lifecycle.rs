@@ -1,5 +1,3 @@
-// src/memory/memory_manager/lifecycle.rs
-
 use super::MemoryManager;
 use crate::memory::address_space::AddressSpace;
 use x86_64::structures::paging::{PageTable, page_table::FrameError};
@@ -22,10 +20,7 @@ pub fn destroy_address_space(&mut self, space: &mut AddressSpace) {
         (self.physical_memory_offset + p4_frame.start_address().as_u64()).as_mut_ptr();
     let p4: &mut PageTable = unsafe { &mut *p4_ptr };
 
-    // Free only the private user P4 slot(s).
-    //
-    // Low-half kernel mappings and higher-half kernel mappings are shared
-    // and must NOT be freed here.
+    // Kernel mappings are shared, so only release the private user P4 slot.
     for idx in USER_P4_START..USER_P4_END {
         let p4_entry = &mut p4[idx];
 
@@ -34,25 +29,20 @@ pub fn destroy_address_space(&mut self, space: &mut AddressSpace) {
                 .as_mut_ptr();
             let p3: &mut PageTable = unsafe { &mut *p3_ptr };
 
-            // Recursively free P3, P2, P1, and the mapped data frames.
             self.free_page_tables_recursive(p3, 3);
 
-            // Free the P3 table frame itself.
             unsafe {
                 self.frame_allocator.free_frame(p3_frame);
             }
 
-            // Clear the entry so it doesn't point to freed memory.
             p4_entry.set_unused();
         }
     }
 
-    // Free the P4 frame itself.
     unsafe {
         self.frame_allocator.free_frame(p4_frame);
     }
 
-    // Clear VMA tracking.
     space.vmas.clear();
 }
     /// Recursively walks the page table hierarchy and frees all frames.
@@ -66,22 +56,18 @@ pub fn destroy_address_space(&mut self, space: &mut AddressSpace) {
                         let next_table_ptr = (self.physical_memory_offset + frame.start_address().as_u64()).as_mut_ptr();
                         let next_table: &mut PageTable = unsafe { &mut *next_table_ptr };
                         
-                        // Recurse down the tree
                         self.free_page_tables_recursive(next_table, level - 1);
                         
-                        // Free the intermediate table frame after its children are freed
                         unsafe { self.frame_allocator.free_frame(frame); }
                     } else {
-                        // Level 1: `frame` is the actual mapped physical memory page
                         unsafe { self.frame_allocator.free_frame(frame); }
                     }
                 }
                 Err(FrameError::FrameNotPresent) => {
-                    // Nothing mapped here, skip.
+                    // The entry does not reference a frame.
                 }
                 Err(FrameError::HugeFrame) => {
-                    // If you implement 2MB/1GB pages later, you would free 
-                    // the large frame here. For now, we just skip it.
+                    // Huge pages are not supported here.
                 }
             }
         }

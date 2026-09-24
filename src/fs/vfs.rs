@@ -1,5 +1,3 @@
-// src/fs/vfs.rs
-
 use alloc::sync::Arc;
 
 use crate::sync::IrqSafeMutex;

@@ -1,5 +1,3 @@
-// src/interrupts/mod.rs
-
 pub mod gdt;
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
@@ -177,7 +175,6 @@ global_asm!(
     "push r10",
     "push r11",
     
-    // Call the Rust handler
     "call timer_interrupt_rust_handler",
     
     // Pop caller-saved registers (restores the new thread's state)
@@ -236,12 +233,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    // Check the Code Segment (CS) register to see what Ring we were in.
-    // The bottom 2 bits of CS represent the Requested Privilege Level (RPL).
+    // The low two bits of CS identify the interrupted privilege level.
     let cs = stack_frame.code_segment;
     
     if cs & 0x3 == 3 {
-        // We are in Ring 3 (User Mode)! The user program did something illegal.
         let tid = SCHEDULER.lock().get_current().expect("No current thread during #GP");
         let owner = PROCESS_MANAGER.lock().thread(tid).get_owner();
         
@@ -250,10 +245,8 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         serial_println!("  Error Code: {:#x}", error_code);
         serial_println!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
         
-        // Kill the thread and seamlessly switch to the next one
         crate::process::process_manager::kill_current_thread_and_schedule(tid);
     } else {
-        // We are in Ring 0 (Kernel Mode)! The kernel did something wrong. This is fatal.
         panic!(
             "\n!!! KERNEL EXCEPTION: GENERAL PROTECTION FAULT (#GP) !!!\n  Error Code: {:#x}\n  Stack Frame:\n{:#?}", 
             error_code, stack_frame

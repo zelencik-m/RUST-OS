@@ -1,5 +1,3 @@
-// src/fs/devices.rs
-
 use alloc::sync::Arc;
 
 use super::error::FsError;
@@ -33,8 +31,7 @@ impl Inode for ConsoleInode {
         match self.kind {
             ConsoleKind::Stdin => Err(FsError::ReadOnly),
             ConsoleKind::Stdout | ConsoleKind::Stderr => {
-                // Keep the behavior of the existing sys_write(): write to both
-                // serial output and VGA output.
+                // Preserve sys_write's serial and VGA output behavior.
                 if let Ok(s) = core::str::from_utf8(buf) {
                     crate::serial_print!("{}", s);
                     crate::print!("{}", s);

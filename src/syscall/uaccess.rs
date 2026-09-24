@@ -10,10 +10,7 @@ use crate::syscall::errors::SysError;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
-/// Convert a raw u64 into a canonical VirtAddr.
-///
-/// We manually check canonicality because `VirtAddr::new()` panics on
-/// non-canonical addresses, and user input must never panic the kernel.
+/// Convert a raw user address to a canonical `VirtAddr` without panicking.
 pub fn canonical_user_addr(addr: u64) -> Result<VirtAddr, SysError> {
     let high = addr >> 48;
     if high != 0 && high != 0xffff {
@@ -57,9 +54,7 @@ pub fn copy_to_user(
 
 /// Copy a NUL-terminated string from userspace.
 ///
-/// Paths are infrequent enough that the byte-at-a-time implementation is a
-/// worthwhile simplicity tradeoff here: it stops exactly at NUL and never
-/// speculatively reads the page after the string.
+/// Read byte by byte so the copy stops at NUL without touching the next page.
 pub fn copy_c_string_from_user(
     pid: PID,
     src: u64,
@@ -105,7 +100,6 @@ fn copy_user_internal(
 
     let mut offset = 0usize;
 
-    // Existing kernel convention: ProcessManager -> MemoryManager.
     let mut pm = PROCESS_MANAGER.lock();
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard

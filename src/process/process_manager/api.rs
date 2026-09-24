@@ -1,5 +1,3 @@
-// src/process/process_manager/api.rs
-
 //! Free-function wrappers that orchestrate locking across subsystems.
 //!
 //! Lock order is always: **Scheduler → ProcessManager → MemoryManager**.
@@ -71,9 +69,7 @@ pub fn switch_to(tid: TID) {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
 
-    // Free any zombie threads that died since the last context switch.
-    // We are running on `scheduler.current`'s kernel stack, so
-    // `reap_dead_threads` skips that one and frees the rest.
+    // The reaper skips the current thread because its kernel stack is active.
     pm.reap_dead_threads(scheduler.current);
 
     let new_owner = pm.thread(tid).get_owner();
@@ -181,12 +177,10 @@ pub fn map_user_region_for_process(
     leaf_flags: PageTableFlags,
     kind: VmaKind,
 ) -> Result<VirtAddr, Oom> {
-    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
     let space = proc.address_space.as_mut().expect("Process has no address space");
 
-    // 2. Acquire MemoryManager SECOND
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
 
@@ -200,12 +194,10 @@ pub fn register_vma_only(
     flags: PageTableFlags,
     kind: VmaKind,
 ) {
-    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
     let space = proc.address_space.as_mut().expect("Process has no address space");
 
-    // 2. Acquire MemoryManager SECOND
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
 
@@ -217,11 +209,8 @@ pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
     {
         let mut sched = SCHEDULER.lock();
         sched.remove_from_runnables(tid);
-        // IMPORTANT: keep `sched.current == Some(tid)`. We are still executing
-        // on this thread's kernel stack, and the reaper uses `current` to know
-        // which stack it must NOT free yet. `commit_switch` overwrites it the
-        // moment we switch away below. (The thread is Zombie and no longer in
-        // `runnables`, so it can never be scheduled again.)
+        // Keep this TID current until the switch: the reaper must not free the
+        // kernel stack this code is using. commit_switch updates it on switch.
     }
     {
         let mut pm = PROCESS_MANAGER.lock();
@@ -233,12 +222,10 @@ pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
 }
 
 pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, crate::memory::memory_manager::Oom> {
-    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
     let proc = pm_guard.process_mut(pid);
     let space = proc.address_space.as_mut().expect("Process has no address space");
 
-    // 2. Acquire MemoryManager SECOND
     let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
     let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
 
@@ -250,7 +237,6 @@ pub fn demand_map_page(
     page_addr: VirtAddr,
     leaf_flags: PageTableFlags,
 ) -> Result<(), crate::memory::memory_manager::Oom> {
-    // 1. Acquire ProcessManager FIRST
     let mut pm_guard = PROCESS_MANAGER.lock();
 
     let proc = pm_guard.process_mut(pid);
@@ -259,12 +245,9 @@ pub fn demand_map_page(
         .as_mut()
         .expect("Process has no address space");
 
-    // 2. Acquire MemoryManager SECOND
     let mut mm_guard = MEMORY_MANAGER.lock();
     let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
 
-    // demand_map_page now handles zeroing internally via the
-    // physical-memory direct map, so no extra work needed here.
     mm.demand_map_page(space, page_addr, leaf_flags)
 }
 
@@ -273,8 +256,7 @@ pub fn handle_thread_page_fault(tid: TID, fault_addr: VirtAddr) -> (PID, FaultAc
 
     let owner = pm_guard.thread(tid).get_owner();
 
-    // Kernel threads or processes without a user address space cannot
-    // resolve user-style page faults.
+    // Kernel processes have no user address space to resolve the fault.
     if pm_guard.process(owner).address_space.is_none() {
         return (owner, FaultAction::Segfault);
     }
@@ -321,8 +303,7 @@ pub fn sys_mmap_anonymous(
         .as_mut()
         .ok_or(Oom)?;
 
-    // Use top-down allocation so anonymous mappings do not immediately
-    // collide with the bottom-up brk region.
+    // Keep anonymous mappings away from the bottom-up brk region.
     let start = space
         .find_free_region_top_down(size as u64)
         .ok_or(Oom)?;
