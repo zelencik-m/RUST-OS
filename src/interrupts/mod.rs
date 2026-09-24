@@ -11,7 +11,6 @@ use crate::serial_println;
 use crate::scheduler::scheduler::{SCHEDULER, yield_now};
 use crate::PROCESS_MANAGER;
 use crate::syscall::entry;
-use crate::syscall::numbers::SYS_EXIT;
 use core::arch::global_asm;
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -146,7 +145,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
             HandleControl::Ignore,
         ));
 
-    let keyboard = KEYBOARD.lock();
+    let _keyboard = KEYBOARD.lock();
     let mut port = Port::new(0x60);
 
     let scancode: u8 = unsafe { port.read() };

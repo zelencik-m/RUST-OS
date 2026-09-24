@@ -38,8 +38,6 @@ pub struct ProcessIdentity {
     children: Vec<PID>,
 }
 
-struct ProcessContext {}
-
 const MAX_FDS: usize = 256;
 
 pub struct Process {

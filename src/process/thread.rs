@@ -1,7 +1,7 @@
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::alloc::Layout;
 use core::arch::global_asm;
-use crate::{debug, println};
+use crate::debug;
 use x86_64::VirtAddr;
 use crate::process::usermode::user_thread_trampoline;
 
@@ -135,7 +135,7 @@ impl Thread {
 
         unsafe {
             *((stack_top - 32) as *mut u64) = 0x202;
-            *((stack_top - 24) as *mut u64) = user_thread_trampoline as u64;
+            *((stack_top - 24) as *mut u64) = user_thread_trampoline as *const () as u64;
             *((stack_top - 16) as *mut u64) = entry_point.as_u64();
             *((stack_top - 8) as *mut u64) = user_stack_top.as_u64();
         }

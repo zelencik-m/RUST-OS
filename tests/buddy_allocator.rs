@@ -74,7 +74,7 @@ static mut TEST_HEAP: AlignedHeap = AlignedHeap([0; HEAP_SIZE]);
 fn new_allocator() -> Locked<BuddyAllocator> {
     let allocator = Locked::new(BuddyAllocator::new());
     unsafe {
-        let heap_start = addr_of_mut!(TEST_HEAP) as usize;
+        let heap_start = addr_of_mut!(TEST_HEAP.0) as usize;
         allocator.lock().init(heap_start, HEAP_SIZE);
     }
     allocator

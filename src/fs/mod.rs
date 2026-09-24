@@ -22,8 +22,6 @@ pub use block_device::BlockDevice;
 pub use ata_pio::AtaPioDisk;
 pub use ext2::Ext2Fs;
 
-use crate::serial_println;
-
 use alloc::sync::Arc;
 
 /// Initialize the filesystem stack with the ext2 disk as the VFS root.

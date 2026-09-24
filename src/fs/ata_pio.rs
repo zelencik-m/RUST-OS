@@ -101,11 +101,10 @@ impl AtaPioDisk {
     }
 
     fn wait_not_busy(&self) -> Result<u8, FsError> {
-        let mut last = 0u8;
         for _ in 0..10_000_000usize {
-            last = self.read_status();
-            if (last & ATA_STATUS_BSY) == 0 {
-                return Ok(last);
+            let status = self.read_status();
+            if (status & ATA_STATUS_BSY) == 0 {
+                return Ok(status);
             }
             core::hint::spin_loop();
         }

@@ -2,8 +2,7 @@ use core::ptr;
 use alloc::vec::Vec;
 use x86_64::{
     structures::paging::{
-        FrameAllocator, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
-        Mapper,
+        FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB,
     },
     VirtAddr,
 };

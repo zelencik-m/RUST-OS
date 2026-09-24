@@ -12,8 +12,6 @@ use super::inode::{DirEntry, FileStat, FileType, Inode, InodeRef};
 
 mod ondisk;
 
-use crate::serial_println;
-
 use ondisk::{
     align4, put_le16, put_le32, Ext2DirEntryHeader, Ext2DiskInode, Ext2GroupDesc,
     Ext2Superblock, EXT2_DIND_BLOCK, EXT2_FT_DIR, EXT2_FT_REG_FILE, EXT2_NDIR_BLOCKS,

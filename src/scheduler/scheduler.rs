@@ -2,10 +2,8 @@ use alloc::collections::VecDeque;
 use crate::debugln;
 use crate::process::thread::TID;
 use lazy_static::lazy_static;
-use spin::Mutex;
 use crate::process::process_manager::{switch_to, PROCESS_MANAGER};
 use crate::process::thread::ThreadState;
-use x86_64::instructions::interrupts;
 use crate::sync::{IrqSafeMutex};
 
 const TIME_SLICE: u64 = 2; // Number of ticks before a thread is preempted

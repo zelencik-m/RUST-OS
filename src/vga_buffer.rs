@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::AtomicU64;
 
 pub static KERNEL_CR3_PHYS: AtomicU64 = AtomicU64::new(0);
 

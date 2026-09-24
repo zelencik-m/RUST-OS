@@ -7,7 +7,9 @@
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use rust_os::process::process_manager;
-use rust_os::{debugln, hlt_loop, serial_println};
+use rust_os::{debugln, hlt_loop};
+#[cfg(not(test))]
+use rust_os::serial_println;
 use x86_64::instructions::interrupts;
 
 extern crate alloc;

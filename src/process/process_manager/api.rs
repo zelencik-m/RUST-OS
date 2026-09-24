@@ -7,10 +7,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use x86_64::registers::control::Cr3;
-use x86_64::structures::paging::{FrameAllocator, PageTableFlags, PhysFrame, Size4KiB};
+use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
-use x86_64::structures::paging::Mapper;
-use x86_64::structures::paging::Page;
 
 use crate::debugln;
 use crate::memory::address_space::AddressSpace;

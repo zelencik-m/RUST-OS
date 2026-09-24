@@ -25,16 +25,11 @@ use crate::task::executor::Executor;
 use crate::task::{Task, keyboard};
 use crate::process::process_manager::PROCESS_MANAGER;
 use crate::memory::memory_manager::{MemoryManager, MEMORY_MANAGER};
-use bootloader::{BootInfo, entry_point};
+use bootloader::BootInfo;
 use crate::process::process_manager;
-use crate::memory::frame_allocator::{self, FRAME_ALLOCATOR, BootInfoFrameAllocator};
-
-
-use x86_64::structures::paging::FrameAllocator;
-
 
 #[cfg(test)]
-use bootloader::{entry_point, BootInfo};
+use bootloader::entry_point;
 
 #[cfg(test)]
 entry_point!(test_kernel_main);
@@ -74,9 +69,9 @@ pub fn init(boot_info: &'static BootInfo) {
 
     drop(pm);
 
-    let tid_init = process_manager::create_thread(kpid, kernel_init_thread);
+    process_manager::create_thread(kpid, kernel_init_thread);
 
-    let idle_tid = process_manager::create_idle_thread(crate::process::idle::idle_loop);
+    process_manager::create_idle_thread(crate::process::idle::idle_loop);
 }
 
 pub trait Testable {
@@ -111,7 +106,6 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 
 #[cfg(test)]
 fn test_kernel_main(boot_info: &'static BootInfo) -> ! { 
-    use memory::memory_manager::MemoryManager;
     init(boot_info);
 
     test_main();

@@ -2,7 +2,6 @@ use super::{Task, TaskId};
 use alloc::{collections::BTreeMap, sync::Arc, task::Wake};
 use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
-use crate::scheduler::scheduler::{yield_now};
 
 pub struct Executor {
     tasks: BTreeMap<TaskId, Task>,
