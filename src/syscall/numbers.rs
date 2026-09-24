@@ -12,6 +12,7 @@ pub const SYS_GETPID: u64 = 39;
 pub const SYS_MKDIR: u64 = 83;
 pub const SYS_EXIT: u64 = 60;
 pub const SYS_GETTID: u64 = 186;
+pub const SYS_GETDENTS64: u64 = 217;
 
 // Custom helper syscall for testing.
 pub const SYS_SLEEP_TICKS: u64 = 1000;

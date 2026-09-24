@@ -13,7 +13,8 @@ use crate::syscall::uaccess::{
     canonical_user_addr, copy_c_string_from_user, copy_from_user, copy_to_user,
     validate_user_range,
 };
-use crate::fs::{with_vfs, OpenFlags, Path, SeekWhence};
+use crate::fs::{with_vfs, FileType, OpenFlags, Path, SeekWhence};
+use alloc::vec::Vec;
 use x86_64::structures::paging::PageTableFlags;
 
 const PATH_MAX: usize = 4096;
@@ -63,6 +64,7 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
         SYS_GETPID => pid.0,
         SYS_GETTID => tid.0,
         SYS_MKDIR => ret(sys_mkdir(pid, args[0], args[1])),
+        SYS_GETDENTS64 => ret(sys_getdents64(pid, args[0], args[1], args[2])),
         _ => {
             crate::debugln!("syscall: unknown syscall number {}", frame.rax);
             SysError::Enosys.to_errno()
@@ -246,6 +248,74 @@ fn sys_mkdir(
         .map_err(SysError::from_fs_error)?;
 
     Ok(0)
+}
+
+/// Return directory entries using the Linux `getdents64` record layout.
+///
+/// The file offset is used as a directory-entry index, allowing callers to
+/// continue with another call when their buffer is too small for every entry.
+fn sys_getdents64(
+    pid: PID,
+    fd: u64,
+    user_ptr: u64,
+    len: u64,
+) -> Result<u64, SysError> {
+    let size = usize_from_u64(len)?;
+    if size == 0 {
+        return Err(SysError::Einval);
+    }
+    let destination = validate_user_range(user_ptr, size)?;
+
+    let output = {
+        let mut pm = PROCESS_MANAGER.lock();
+        let file = pm.process_mut(pid)
+            .file_mut(fd)
+            .map_err(SysError::from_fs_error)?;
+        let entries = file.readdir().map_err(SysError::from_fs_error)?;
+        let start = usize_from_u64(file.offset())?;
+        let mut next = start;
+        let mut bytes = Vec::new();
+
+        for entry in entries.iter().skip(start) {
+            // linux_dirent64 is a 19-byte header followed by a NUL-terminated
+            // name, with each record rounded up to an 8-byte boundary.
+            let record_len = (19usize
+                .checked_add(entry.name.len())
+                .and_then(|n| n.checked_add(1))
+                .ok_or(SysError::Einval)?
+                + 7) & !7;
+
+            if record_len > size - bytes.len() {
+                if bytes.is_empty() {
+                    return Err(SysError::Einval);
+                }
+                break;
+            }
+
+            let following = next.checked_add(1).ok_or(SysError::Einval)?;
+            // The VFS does not expose inode numbers yet, so provide a stable,
+            // non-zero synthetic value for this directory stream.
+            bytes.extend_from_slice(&(following as u64).to_le_bytes());
+            bytes.extend_from_slice(&(following as i64).to_le_bytes()); // d_off
+            bytes.extend_from_slice(&(record_len as u16).to_le_bytes());
+            bytes.push(match entry.file_type {
+                FileType::Directory => 4, // DT_DIR
+                FileType::Regular => 8,   // DT_REG
+                FileType::Device => 2,    // DT_CHR
+            });
+            bytes.extend_from_slice(entry.name.as_bytes());
+            bytes.push(0);
+            bytes.resize(bytes.len() + record_len - 20 - entry.name.len(), 0);
+            next = following;
+        }
+
+        file.seek(next as i64, SeekWhence::Set)
+            .map_err(SysError::from_fs_error)?;
+        bytes
+    };
+
+    copy_to_user(pid, destination, &output)?;
+    Ok(output.len() as u64)
 }
 
 fn sys_brk_syscall(pid: PID, new_break: u64) -> Result<u64, SysError> {

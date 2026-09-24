@@ -109,8 +109,12 @@ pub fn switch_to(tid: TID) {
         }
     }
 
-    drop(scheduler);
+    // Locks are acquired Scheduler -> ProcessManager, so release them in the
+    // reverse order. Dropping `scheduler` first would restore interrupts while
+    // `PROCESS_MANAGER` is still locked. A timer interrupt in that window can
+    // enter the scheduler and spin forever on `PROCESS_MANAGER`.
     drop(pm);
+    drop(scheduler);
 
     unsafe {
         thread::switch_context(old_ctx, new_ctx);

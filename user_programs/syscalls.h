@@ -13,6 +13,7 @@ enum {
     SYS_LSEEK = 8,
     SYS_EXIT = 60,
     SYS_MKDIR = 83,
+    SYS_GETDENTS64 = 217,
     SYS_SLEEP_TICKS = 1000,
 };
 

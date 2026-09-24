@@ -9,6 +9,7 @@ const PROGRAMS: &[&str] = &[
     "thread_c",
     "syscall_test",
     "vfs_test",
+    "fs_tree_test",
 ];
 
 fn run(command: &mut Command, description: &str) {

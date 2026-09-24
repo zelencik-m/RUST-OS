@@ -28,6 +28,7 @@ embedded_elf!(ELF_LOADER_TEST, "elf_loader_test.elf");
 embedded_elf!(SYSCALL_TEST, "syscall_test.elf");
 embedded_elf!(RING3_EXCEPTION_TEST, "ring3_exception_test.elf");
 embedded_elf!(VFS_TEST, "vfs_test.elf");
+embedded_elf!(FS_TREE_TEST, "fs_tree_test.elf");
 embedded_elf!(THREAD_B, "thread_b.elf");
 embedded_elf!(THREAD_C, "thread_c.elf");
 
@@ -38,6 +39,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
         launch_user_program("elf_loader_test", &ELF_LOADER_TEST.0);
         launch_user_program("syscall_test", &SYSCALL_TEST.0);
         launch_user_program("vfs_test", &VFS_TEST.0);
+        launch_user_program("fs_tree_test", &FS_TREE_TEST.0);
         launch_user_program("ring3_exception_test", &RING3_EXCEPTION_TEST.0);
         launch_user_program("thread_b", &THREAD_B.0);
         launch_user_program("thread_c", &THREAD_C.0);
