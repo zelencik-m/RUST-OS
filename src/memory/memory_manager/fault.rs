@@ -1,45 +1,68 @@
 // src/memory/memory_manager/fault.rs
 
 use super::MemoryManager;
-use super::vmm::Oom; // Import Oom from sibling module
+use super::vmm::Oom;
 use crate::memory::address_space::AddressSpace;
 use crate::memory::vma::VmaKind;
-use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB, Mapper, FrameAllocator};
+use x86_64::structures::paging::{
+    FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
+};
 use x86_64::VirtAddr;
 
+/// Result of handling a page fault.
+///
+/// This is the single classification used by the kernel's page-fault path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FaultAction { Resolved, Segfault }
+pub enum FaultAction {
+    /// The fault was resolved by demand-mapping a page.
+    Resolved,
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PageFaultError;
+    /// The fault hit a guard page, e.g. stack overflow.
+    Guard,
+
+    /// The address is not covered by any valid VMA.
+    Segfault,
+
+    /// The fault could not be resolved because memory ran out.
+    Oom,
+}
 
 impl MemoryManager {
+    /// Handle a page fault for a given address space.
+    ///
+    /// This is the single authoritative page-fault handler for user address
+    /// spaces. It performs VMA lookup, guard-page detection, and demand
+    /// mapping in one place.
     pub fn handle_page_fault(
         &mut self,
         space: &mut AddressSpace,
         fault_addr: VirtAddr,
-    ) -> Result<FaultAction, PageFaultError> {
+    ) -> FaultAction {
         let page_addr = Page::<Size4KiB>::containing_address(fault_addr).start_address();
-        
-        if let Some(vma) = space.get_vma(fault_addr) {
-            // Catch stack overflows hitting the guard page
-            if vma.kind == VmaKind::Guard {
-                return Ok(FaultAction::Segfault);
-            }
-            
-            // In a VMA, demand map it
-            self.demand_map_page(space, page_addr, vma.flags)
-                .map(|_| {
-                    unsafe { core::ptr::write_bytes(page_addr.as_mut_ptr::<u8>(), 0, 4096); }
-                    FaultAction::Resolved
-                })
-                .map_err(|_| PageFaultError)
-        } else {
-            Ok(FaultAction::Segfault)
+
+        let (kind, flags) = match space.get_vma(fault_addr) {
+            Some(vma) => (vma.kind, vma.flags),
+            None => return FaultAction::Segfault,
+        };
+
+        // Guard pages are intentionally not present. Touching one is fatal
+        // for the faulting thread.
+        if kind == VmaKind::Guard {
+            return FaultAction::Guard;
+        }
+
+        match self.demand_map_page(space, page_addr, flags) {
+            Ok(()) => FaultAction::Resolved,
+            Err(_) => FaultAction::Oom,
         }
     }
 
-    pub fn demand_map_page(
+    /// Demand-map one page into an address space.
+    ///
+    /// This is intentionally not exposed as a general page-fault entry point.
+    /// Use `handle_page_fault` instead so guard-page and VMA checks are not
+    /// duplicated.
+    pub(crate) fn demand_map_page(
         &mut self,
         space: &mut AddressSpace,
         page_addr: VirtAddr,
@@ -52,6 +75,7 @@ impl MemoryManager {
             | PageTableFlags::USER_ACCESSIBLE;
 
         let page = Page::<Size4KiB>::containing_address(page_addr);
+
         let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
 
         unsafe {
@@ -66,7 +90,17 @@ impl MemoryManager {
                 .map_err(|_| Oom)?
                 .flush();
         }
-        
+
+        // Zero the newly mapped page via the physical-memory direct map,
+        // so this works regardless of which CR3 is currently active.
+        let kernel_ptr = (self.physical_memory_offset
+            + frame.start_address().as_u64())
+            .as_mut_ptr::<u8>();
+
+        unsafe {
+            core::ptr::write_bytes(kernel_ptr, 0, 4096);
+        }
+
         Ok(())
     }
 }

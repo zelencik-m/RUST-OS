@@ -13,36 +13,48 @@ impl MemoryManager {
         )
     }
 
-    pub fn destroy_address_space(&mut self, space: &mut AddressSpace) {
-        let p4_frame = space.p4_frame;
-        let p4_ptr = (self.physical_memory_offset + p4_frame.start_address().as_u64()).as_mut_ptr();
-        let p4: &mut PageTable = unsafe { &mut *p4_ptr };
+pub fn destroy_address_space(&mut self, space: &mut AddressSpace) {
+    use crate::memory::address_space::{USER_P4_START, USER_P4_END};
 
-        // 1. Walk and free all user-space mappings (indices 0..256)
-        // `.take(256)` is much cleaner than `enumerate()` and `break`!
-        for p4_entry in p4.iter_mut().take(256) {
-            if let Ok(p3_frame) = p4_entry.frame() {
-                let p3_ptr = (self.physical_memory_offset + p3_frame.start_address().as_u64()).as_mut_ptr();
-                let p3: &mut PageTable = unsafe { &mut *p3_ptr };
-                
-                // Recursively free P3, P2, P1, and the mapped data frames
-                self.free_page_tables_recursive(p3, 3);
-                
-                // Free the P3 table frame itself
-                unsafe { self.frame_allocator.free_frame(p3_frame); }
-                
-                // Good hygiene: clear the entry so it doesn't point to freed memory
-                p4_entry.set_unused();
+    let p4_frame = space.p4_frame;
+
+    let p4_ptr =
+        (self.physical_memory_offset + p4_frame.start_address().as_u64()).as_mut_ptr();
+    let p4: &mut PageTable = unsafe { &mut *p4_ptr };
+
+    // Free only the private user P4 slot(s).
+    //
+    // Low-half kernel mappings and higher-half kernel mappings are shared
+    // and must NOT be freed here.
+    for idx in USER_P4_START..USER_P4_END {
+        let p4_entry = &mut p4[idx];
+
+        if let Ok(p3_frame) = p4_entry.frame() {
+            let p3_ptr = (self.physical_memory_offset + p3_frame.start_address().as_u64())
+                .as_mut_ptr();
+            let p3: &mut PageTable = unsafe { &mut *p3_ptr };
+
+            // Recursively free P3, P2, P1, and the mapped data frames.
+            self.free_page_tables_recursive(p3, 3);
+
+            // Free the P3 table frame itself.
+            unsafe {
+                self.frame_allocator.free_frame(p3_frame);
             }
-        }
 
-        // 2. Free the P4 frame itself
-        unsafe { self.frame_allocator.free_frame(p4_frame); }
-        
-        // 3. Clear VMA tracking
-        space.vmas.clear();
+            // Clear the entry so it doesn't point to freed memory.
+            p4_entry.set_unused();
+        }
     }
 
+    // Free the P4 frame itself.
+    unsafe {
+        self.frame_allocator.free_frame(p4_frame);
+    }
+
+    // Clear VMA tracking.
+    space.vmas.clear();
+}
     /// Recursively walks the page table hierarchy and frees all frames.
     /// `level` should be 3 for P3, 2 for P2, 1 for P1.
     fn free_page_tables_recursive(&mut self, table: &mut PageTable, level: u8) {

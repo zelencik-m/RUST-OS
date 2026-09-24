@@ -1,4 +1,5 @@
 // src/process/process_manager/memory_ops.rs
+
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
@@ -12,11 +13,5 @@ impl ProcessManager {
         let proc = self.process(pid);
         let space = proc.address_space.as_ref()?;
         space.get_vma_flags(addr)
-    }
-
-    pub fn get_vma(&self, pid: PID, addr: VirtAddr) -> Option<VmArea> {
-        let proc = self.process(pid);
-        let space = proc.address_space.as_ref()?;
-        space.get_vma(addr).copied()
     }
 }

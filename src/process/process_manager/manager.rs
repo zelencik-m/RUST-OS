@@ -2,9 +2,8 @@
 
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-
+use alloc::collections::VecDeque;
 use lazy_static::lazy_static;
-
 use crate::process::thread::{TID, Thread, ThreadContext};
 use crate::process::{PID, Process};
 use crate::sync::IrqSafeMutex;
@@ -15,6 +14,7 @@ pub struct ProcessManager {
     pub(crate) free_pids: Vec<PID>,
     pub(crate) free_tids: Vec<TID>,
     pub(crate) kernel_context: ThreadContext,
+    pub(crate) reap_queue: VecDeque<TID>,
 }
 
 lazy_static! {
@@ -30,6 +30,7 @@ impl ProcessManager {
             free_pids: Vec::new(),
             free_tids: Vec::new(),
             kernel_context: ThreadContext::zeroed(),
+            reap_queue: VecDeque::new(),
         }
     }
 

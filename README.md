@@ -8,6 +8,20 @@ A modular kernel with processes, threads, and a FIFO scheduler supporting time-s
 - **Thread** – owns a stack, CPU context, state, and a reference to its process.
 - **Scheduler** – global run-queue, sleep queue, idle thread, and time slice (2 ticks).
 
+## Standalone user programs
+
+The smoke-test programs live in `user_programs/` as independent freestanding C
+sources. `build.rs` compiles and links each source into an ELF file,
+and the kernel embeds those build artifacts. At boot, `main` passes every
+image through the regular ELF loader and starts it as its own user process.
+The long-running `thread_b` and `thread_c` programs exercise scheduler sleep
+and wake-up behavior after the finite smoke tests have exited.
+
+To add another program, add its `.c` file to `user_programs/`, list its name in
+`PROGRAMS` in `build.rs`, embed it in `src/main.rs`, and call
+`launch_user_program`. The common linker script places programs in the
+kernel's isolated user address range.
+
 ## Process & Thread Management
 
 - PID(0) = kernel process (auto‑created).

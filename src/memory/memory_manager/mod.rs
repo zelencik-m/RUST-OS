@@ -14,7 +14,7 @@ mod allocators;
 
 // Re-export public types/enums so `use crate::memory::memory_manager::Oom` still works
 pub use vmm::Oom;
-pub use fault::{FaultAction, PageFaultError};
+pub use fault::FaultAction;
 
 pub struct MemoryManager {
     pub mapper: OffsetPageTable<'static>,
@@ -44,6 +44,8 @@ impl MemoryManager {
     }
 
     pub fn init_heap(&mut self) -> Result<(), MapToError<Size4KiB>> {
-        crate::memory::allocator::init_heap(&mut self.mapper, &mut self.frame_allocator)
+        crate::memory::allocator::init_heap(&mut self.mapper, &mut self.frame_allocator)?;
+        self.frame_allocator.enable_tracking();
+        Ok(())
     }
 }

@@ -16,6 +16,8 @@ pub mod debug;
 pub mod process;
 pub mod scheduler;
 pub mod sync;
+pub mod syscall;
+pub mod fs;
 
 extern crate alloc;
 
@@ -56,9 +58,17 @@ pub fn init(boot_info: &'static BootInfo) {
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
-    mm.init_heap().expect("heap initialization failed");
 
+    crate::vga_buffer::KERNEL_CR3_PHYS.store(
+        mm.kernel_p4_frame.start_address().as_u64(),
+        core::sync::atomic::Ordering::Relaxed,
+    );
+
+    mm.init_heap().expect("heap initialization failed");
     *MEMORY_MANAGER.lock() = Some(mm);
+
+    crate::fs::init().expect("filesystem initialization failed");
+    
     // unsafe { frame_allocator::init_global_allocator(&boot_info.memory_map) };
 
     let mut pm = PROCESS_MANAGER.lock();
@@ -72,9 +82,6 @@ pub fn init(boot_info: &'static BootInfo) {
     let tid_init = process_manager::create_thread(kpid, kernel_init_thread);
 
     let idle_tid = process_manager::create_idle_thread(crate::process::idle::idle_loop);
-    x86_64::instructions::interrupts::enable();
-
-
 }
 
 pub trait Testable {
@@ -167,6 +174,7 @@ fn test_heap_allocation() {
 extern "C" fn kernel_init_thread() -> ! {
     println!("Kernel init thread started. Running Async Executor...");
     
+    
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
     executor.spawn(Task::new(keyboard::print_keypresses()));
@@ -187,4 +195,3 @@ async fn example_task() {
     let number = async_number().await;
     println!("async number: {}", number);
 }
-
