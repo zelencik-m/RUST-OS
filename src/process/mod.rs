@@ -70,6 +70,22 @@ impl Process {
         }
     }
 
+    pub fn pid(&self) -> PID {
+        self.identity.pid
+    }
+
+    pub fn name(&self) -> &str {
+        &self.identity.name
+    }
+
+    pub fn process_type(&self) -> &ProcessType {
+        &self.identity.process_type
+    }
+
+    pub fn parent(&self) -> Option<PID> {
+        self.identity.parent
+    }
+
     pub fn add_child(&mut self, child_pid: PID) {
         self.identity.children.push(child_pid);
     }
