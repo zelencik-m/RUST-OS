@@ -10,12 +10,6 @@ impl ProcessManager {
         scheduler: &mut Scheduler,
         tid: TID,
     ) -> (*mut ThreadContext, *const ThreadContext) {
-        let new_ctx: *const ThreadContext = {
-            let t = self.thread_mut(tid);
-            t.set_state(ThreadState::Running);
-            t.context_ptr()
-        };
-
         let old_ctx: *mut ThreadContext = match scheduler.current {
             Some(cur) => {
                 let t = self.thread_mut(cur);
@@ -25,6 +19,15 @@ impl ProcessManager {
                 t.context_mut()
             }
             None => &mut self.kernel_context as *mut _,
+        };
+
+        // The scheduler can select the currently running thread again. Marking
+        // the selected thread Running before handling the old thread would
+        // then immediately change that same thread back to Ready.
+        let new_ctx: *const ThreadContext = {
+            let t = self.thread_mut(tid);
+            t.set_state(ThreadState::Running);
+            t.context_ptr()
         };
 
         scheduler.current = Some(tid);

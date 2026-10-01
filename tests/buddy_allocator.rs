@@ -8,9 +8,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
 
-use rust_os::{serial_print, serial_println};
-use rust_os::memory::allocator::buddy_allocator::{BuddyAllocator};
-use rust_os::memory::allocator::{Locked};
+use rust_os::memory::allocator::buddy_allocator::BuddyAllocator;
+use rust_os::memory::allocator::Locked;
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -20,44 +19,23 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    rust_os::test_panic_handler(info)
+    support::test_panic_handler(info)
 }
-
-// Width of the padded test-name column, so every "[ok]" lands in the same
-// spot regardless of test name length.
-const NAME_COL: usize = 52;
 
 /// Runs the allocator tests and reports the result to QEMU.
 pub fn test_runner(tests: &[&dyn Fn()]) {
-    serial_println!();
-    serial_println!("┌────────────────────────────────────────────────────┐");
-    serial_println!("│  Buddy Allocator Test Suite  ({:>2} tests)            │", tests.len());
-    serial_println!("└────────────────────────────────────────────────────┘");
-
+    support::begin_suite("buddy_allocator", tests.len());
     for test in tests {
         test();
     }
-
-    serial_println!("┌────────────────────────────────────────────────────┐");
-    serial_println!("│  All {:>2} tests passed                              │", tests.len());
-    serial_println!("└────────────────────────────────────────────────────┘");
-    serial_println!();
-
-    rust_os::exit_qemu(rust_os::QemuExitCode::Success);
+    support::finish_suite();
 }
 
-/// Prints a section divider before a group of related tests.
-fn section(name: &str) {
-    serial_println!();
-    serial_println!("── {} ──", name);
-}
-
-/// Prints the padded test name, runs `body`, then prints "[ok]".
+/// Runs the body and reports the result through the shared suite formatter.
 macro_rules! run_test {
     ($name:expr, $body:block) => {{
-        serial_print!("{:<width$}", concat!($name, "..."), width = NAME_COL);
         $body
-        serial_println!("[ok]");
+        support::report_pass($name);
     }};
 }
 
@@ -82,7 +60,6 @@ fn new_allocator() -> Locked<BuddyAllocator> {
 
 #[test_case]
 fn test_simple_alloc_dealloc() {
-    section("Basic operations");
     run_test!("test_simple_alloc_dealloc", {
         let allocator = new_allocator();
         let layout = Layout::from_size_align(8, 4).unwrap();
@@ -105,7 +82,7 @@ fn test_alignment_is_respected() {
     run_test!("test_alignment_is_respected", {
         let allocator = new_allocator();
 
-        for &align in &[8usize, 16, 32, 64, 128] {
+        for &align in &[8usize, 16, 32, 64, 128, 256, 512, 1024, 2048] {
             let layout = Layout::from_size_align(1, align).unwrap();
             unsafe {
                 let ptr = allocator.alloc(layout);
@@ -119,6 +96,49 @@ fn test_alignment_is_respected() {
                 );
                 allocator.dealloc(ptr, layout);
             }
+        }
+    });
+}
+
+#[test_case]
+fn test_sub_minimum_request_uses_minimum_block() {
+    run_test!("test_sub_minimum_request_uses_minimum_block", {
+        let allocator = new_allocator();
+        let small = Layout::from_size_align(1, 1).unwrap();
+        let min_block = Layout::from_size_align(16, 16).unwrap();
+
+        unsafe {
+            let first = allocator.alloc(small);
+            assert!(!first.is_null(), "small layout should be allocatable");
+            let second = allocator.alloc(min_block);
+            assert!(!second.is_null());
+            assert_ne!(first, second, "each allocation must reserve a block");
+
+            allocator.dealloc(first, small);
+            allocator.dealloc(second, min_block);
+        }
+    });
+}
+
+#[test_case]
+fn test_reused_allocation_is_writable() {
+    run_test!("test_reused_allocation_is_writable", {
+        let allocator = new_allocator();
+        let layout = Layout::from_size_align(64, 16).unwrap();
+
+        unsafe {
+            let first = allocator.alloc(layout);
+            assert!(!first.is_null());
+            core::ptr::write_bytes(first, 0xA5, layout.size());
+            allocator.dealloc(first, layout);
+
+            let reused = allocator.alloc(layout);
+            assert_eq!(reused, first, "freed block should be reusable");
+            core::ptr::write_bytes(reused, 0x5A, layout.size());
+            for offset in 0..layout.size() {
+                assert_eq!(*reused.add(offset), 0x5A);
+            }
+            allocator.dealloc(reused, layout);
         }
     });
 }
@@ -182,7 +202,6 @@ fn test_split_produces_correctly_sized_block() {
 
 #[test_case]
 fn test_alloc_returns_null_when_heap_exhausted() {
-    section("Bounds & edge cases");
     run_test!("test_alloc_returns_null_when_heap_exhausted", {
         let allocator = new_allocator();
         let layout = Layout::from_size_align(16, 16).unwrap(); // min-order block
@@ -225,7 +244,6 @@ fn test_oversized_request_returns_null() {
 
 #[test_case]
 fn test_coalescing_on_dealloc() {
-    section("Coalescing");
     run_test!("test_coalescing_on_dealloc", {
         let allocator = new_allocator();
         let layout16 = Layout::from_size_align(16, 16).unwrap();
@@ -271,6 +289,23 @@ fn test_coalescing_on_dealloc() {
             );
 
             allocator.dealloc(merged, layout32);
+
+            // After returning that block, every freed buddy should eventually
+            // coalesce back into a block large enough for the whole heap.
+            for i in 0..total_blocks {
+                if i != 0 && i != buddy_index {
+                    allocator.dealloc(ptrs[i], layout16);
+                }
+            }
+            let whole_heap = Layout::from_size_align(HEAP_SIZE, HEAP_SIZE).unwrap();
+            let restored = allocator.alloc(whole_heap);
+            assert!(
+                !restored.is_null(),
+                "freeing all blocks should restore the heap"
+            );
+            assert_eq!(restored as usize, addr_of_mut!(TEST_HEAP) as usize);
+            allocator.dealloc(restored, whole_heap);
         }
     });
 }
+mod support;

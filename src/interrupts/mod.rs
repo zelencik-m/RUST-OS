@@ -95,36 +95,36 @@ extern "x86-interrupt" fn page_fault_handler(
         }
 
         FaultAction::Guard => {
-            serial_println!(
+            crate::debugln!(
                 "PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})",
                 owner.0,
                 tid
             );
-            serial_println!("  faulting addr: {:?}", fault_addr);
+            crate::debugln!("  faulting addr: {:?}", fault_addr);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
 
         FaultAction::Segfault => {
-            serial_println!(
+            crate::debugln!(
                 "PAGE FAULT: killing PID({}), TID({:?})",
                 owner.0,
                 tid
             );
-            serial_println!("  faulting addr: {:?}", fault_addr);
-            serial_println!("  error code:    {:?}", error_code);
-            serial_println!("{:#?}", stack_frame);
+            crate::debugln!("  faulting addr: {:?}", fault_addr);
+            crate::debugln!("  error code:    {:?}", error_code);
+            crate::debugln!("{:#?}", stack_frame);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
 
         FaultAction::Oom => {
-            serial_println!(
+            crate::debugln!(
                 "PAGE FAULT: OOM while mapping PID({}), TID({:?})",
                 owner.0,
                 tid
             );
-            serial_println!("  faulting addr: {:?}", fault_addr);
+            crate::debugln!("  faulting addr: {:?}", fault_addr);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
@@ -239,10 +239,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         let tid = SCHEDULER.lock().get_current().expect("No current thread during #GP");
         let owner = PROCESS_MANAGER.lock().thread(tid).get_owner();
         
-        serial_println!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
-        serial_println!("  Killing PID({}), TID({:?})", owner.0, tid);
-        serial_println!("  Error Code: {:#x}", error_code);
-        serial_println!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
+        crate::debugln!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
+        crate::debugln!("  Killing PID({}), TID({:?})", owner.0, tid);
+        crate::debugln!("  Error Code: {:#x}", error_code);
+        crate::debugln!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
         
         crate::process::process_manager::kill_current_thread_and_schedule(tid);
     } else {

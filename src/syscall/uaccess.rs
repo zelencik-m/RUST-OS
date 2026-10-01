@@ -12,11 +12,13 @@ use x86_64::VirtAddr;
 
 /// Convert a raw user address to a canonical `VirtAddr` without panicking.
 pub fn canonical_user_addr(addr: u64) -> Result<VirtAddr, SysError> {
-    let high = addr >> 48;
-    if high != 0 && high != 0xffff {
+    let canonical = VirtAddr::try_new(addr).map_err(|_| SysError::Efault)?;
+    // `try_new` sign-extends bit 47, so require that the supplied value was
+    // already in canonical form instead of silently accepting its alias.
+    if canonical.as_u64() != addr {
         return Err(SysError::Efault);
     }
-    Ok(VirtAddr::new(addr))
+    Ok(canonical)
 }
 
 /// Validate a user address range.

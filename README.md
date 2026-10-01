@@ -2,25 +2,46 @@
 
 A modular kernel with processes, threads, and a FIFO scheduler supporting time-slice preemption and sleep queues.
 
+## Kernel tests
+
+All test cases live under `tests/`. Run the no-std integration suites with
+`cargo test` (requires nightly Rust, `bootimage`, QEMU, Clang, and the ext2 image
+configured in `.cargo/config.toml` and `Cargo.toml`). Each Rust test file boots
+its own test kernel. Run one suite with `cargo test --test <file_stem>`.
+
+Debug logging is enabled by normal kernel boot and disabled in test kernels.
+Every suite prints aligned per-test results followed by passed, failed, and
+total counts. Since Cargo starts each integration suite in a separate QEMU
+process, the suite summaries are per test file; Cargo's exit status is the
+aggregate result across all suites.
+
+The suites cover VGA output, allocation, memory boundaries, user-address
+validation, filesystem operations, and embedded ELF headers. The `userspace`
+suite launches the C smoke tests in `tests/user_programs/` through the real ELF
+loader and scheduler, captures their output, and checks completion. It uses an
+in-memory filesystem for the smoke tests' files. The library and normal kernel
+binary have their unit-test harnesses disabled; tests are integration targets.
+
 ## Overview
 
 - **Process** – holds PID, name, parent/children, and owned thread IDs.
 - **Thread** – owns a stack, CPU context, state, and a reference to its process.
 - **Scheduler** – global run-queue, sleep queue, idle thread, and time slice (2 ticks).
 
-## Standalone user programs
+## User-program tests
 
-The smoke-test programs live in `user_programs/` as independent freestanding C
-sources. `build.rs` compiles and links each source into an ELF file,
-and the kernel embeds those build artifacts. At boot, `main` passes every
-image through the regular ELF loader and starts it as its own user process.
-The long-running `thread_b` and `thread_c` programs exercise scheduler sleep
-and wake-up behavior after the finite smoke tests have exited.
+The finite C smoke tests live in `tests/user_programs/`. Run them with
+`cargo test --test userspace`; the test kernel reports the results and exits
+QEMU once the five programs finish, or fails on an error or timeout.
 
-To add another program, add its `.c` file to `user_programs/`, list its name in
-`PROGRAMS` in `build.rs`, embed it in `src/main.rs`, and call
-`launch_user_program`. The common linker script places programs in the
-kernel's isolated user address range.
+The `thread_b` and `thread_c` scheduler demos live in `user_programs/` and are
+part of normal kernel execution. `cargo run` launches both; they print and sleep
+at different intervals indefinitely to exercise scheduler wakeups.
+
+`user_programs/` also contains the shared syscall header and linker script.
+`build.rs` compiles the C test sources into ELF artifacts. To add a smoke test,
+register its source in `build.rs` and add it to the test kernels' embedded-image
+lists. The shared linker script places programs in the isolated user range.
 
 ## Process & Thread Management
 

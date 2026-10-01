@@ -23,20 +23,18 @@ pub const USER_SPACE_START: u64 = (USER_P4_START as u64) << 39;
 pub const USER_SPACE_END: u64 = ((USER_P4_END as u64) << 39) - 0x1000;
 
 pub fn is_user_range(start: VirtAddr, size: u64) -> bool {
+    let start_u64 = start.as_u64();
+    let user_start = USER_SPACE_START;
+    let user_end_exclusive = (USER_P4_END as u64) << 39;
+
     if size == 0 {
         return true;
     }
 
-    let start_u64 = start.as_u64();
-
-    let Some(end_u64) = start_u64.checked_add(size - 1) else {
+    let Some(end_exclusive) = start_u64.checked_add(size) else {
         return false;
     };
-
-    let start_p4 = (start_u64 >> 39) & 0x1FF;
-    let end_p4 = (end_u64 >> 39) & 0x1FF;
-
-    start_p4 >= USER_P4_START as u64 && end_p4 < USER_P4_END as u64
+    start_u64 >= user_start && end_exclusive <= user_end_exclusive
 }
 
 pub struct AddressSpace {

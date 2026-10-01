@@ -20,8 +20,12 @@ panic = "abort"
 
 [[bin]]
 name = "rust-os"
-test = true
+test = false
 bench = false
+
+[lib]
+test = false
+doctest = false
 
 [dependencies.lazy_static]
 version = "1.0"

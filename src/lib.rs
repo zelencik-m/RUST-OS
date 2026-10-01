@@ -1,8 +1,4 @@
 #![no_std]
-#![cfg_attr(test, no_main)]
-#![feature(custom_test_frameworks)]
-#![test_runner(crate::test_runner)]
-#![reexport_test_harness_main = "test_main"]
 #![feature(abi_x86_interrupt)]
 
 pub mod serial;
@@ -19,7 +15,6 @@ pub mod fs;
 
 extern crate alloc;
 
-use core::panic::PanicInfo;
 use interrupts::{gdt};
 use crate::task::executor::Executor;
 use crate::task::{Task, keyboard};
@@ -27,13 +22,6 @@ use crate::process::process_manager::PROCESS_MANAGER;
 use crate::memory::memory_manager::{MemoryManager, MEMORY_MANAGER};
 use bootloader::BootInfo;
 use crate::process::process_manager;
-
-#[cfg(test)]
-use bootloader::entry_point;
-
-#[cfg(test)]
-entry_point!(test_kernel_main);
-
 
 pub fn init(boot_info: &'static BootInfo) {
     gdt::init();
@@ -74,52 +62,6 @@ pub fn init(boot_info: &'static BootInfo) {
     process_manager::create_idle_thread(crate::process::idle::idle_loop);
 }
 
-pub trait Testable {
-    fn run(&self) -> ();
-}
-
-impl<T> Testable for T
-where
-    T: Fn(),
-{
-    fn run(&self) {
-        serial_print!("{}...\t", core::any::type_name::<T>());
-        self();
-        serial_println!("[ok]");
-    }
-}
-
-pub fn test_runner(tests: &[&dyn Testable]) {
-    serial_println!("Running {} tests", tests.len());
-    for test in tests {
-        test.run();
-    }
-    exit_qemu(QemuExitCode::Success);
-}
-
-pub fn test_panic_handler(info: &PanicInfo) -> ! {
-    serial_println!("[failed]\n");
-    serial_println!("Error: {}\n", info);
-    exit_qemu(QemuExitCode::Failed);
-    hlt_loop();
-}
-
-#[cfg(test)]
-fn test_kernel_main(boot_info: &'static BootInfo) -> ! { 
-    init(boot_info);
-
-    test_main();
-    
-    hlt_loop();
-}
-
-#[cfg(test)]
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    test_panic_handler(info)
-}
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
@@ -140,23 +82,6 @@ pub fn hlt_loop() -> ! {
     loop {
         x86_64::instructions::hlt();
     }
-}
-
-#[test_case]
-fn trivial_assertion() {
-    assert_eq!(1, 1);
-}
-
-#[test_case]
-fn test_println_output() {
-    println!("test_println_output");
-}
-
-#[test_case]
-fn test_heap_allocation() {
-    use alloc::boxed::Box;
-    let x = Box::new(42);
-    assert_eq!(*x, 42);
 }
 
 extern "C" fn kernel_init_thread() -> ! {

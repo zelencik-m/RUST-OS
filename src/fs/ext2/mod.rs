@@ -76,7 +76,7 @@ impl Ext2Fs {
             return Err(FsError::Io);
         }
 
-        crate::serial_println!(
+        crate::debugln!(
             "[ext2] mounted: block_size={}, blocks={}, inodes={}, groups={}",
             state.block_size(),
             state.superblock.blocks_count,

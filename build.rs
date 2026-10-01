@@ -2,14 +2,14 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PROGRAMS: &[&str] = &[
-    "elf_loader_test",
-    "ring3_exception_test",
-    "thread_b",
-    "thread_c",
-    "syscall_test",
-    "vfs_test",
-    "fs_tree_test",
+const PROGRAMS: &[(&str, &str)] = &[
+    ("elf_loader_test", "tests/user_programs"),
+    ("ring3_exception_test", "tests/user_programs"),
+    ("syscall_test", "tests/user_programs"),
+    ("vfs_test", "tests/user_programs"),
+    ("fs_tree_test", "tests/user_programs"),
+    ("thread_b", "user_programs"),
+    ("thread_c", "user_programs"),
 ];
 
 fn run(command: &mut Command, description: &str) {
@@ -44,8 +44,9 @@ fn main() {
     println!("cargo:rerun-if-changed={}", linker_script.display());
     println!("cargo:rerun-if-changed={}", syscall_header.display());
 
-    for program in PROGRAMS {
-        let source = Path::new("user_programs").join(format!("{program}.c"));
+    for &(program, source_dir) in PROGRAMS {
+        let source_dir = Path::new(source_dir);
+        let source = source_dir.join(format!("{program}.c"));
         let object = out_dir.join(format!("{program}.o"));
         let elf = out_dir.join(format!("{program}.elf"));
 
@@ -68,6 +69,8 @@ fn main() {
                     "-mno-sse",
                     "-mno-sse2",
                 ])
+                .arg("-I")
+                .arg("user_programs")
                 .arg("-c")
                 .arg(&source)
                 .arg("-o")
