@@ -201,6 +201,11 @@ pub fn register_vma_only(
 }
 
 pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
+    // This thread never resumes, so there is no interrupt state to restore.
+    // Keep interrupts off from here on, so no interrupt runs on the dying
+    // thread's stack after its address space is gone. The next thread's
+    // interrupt flag comes back from its saved RFLAGS in switch_context.
+    x86_64::instructions::interrupts::disable();
     debugln!("Killing thread {:?}", tid);
     {
         let mut sched = SCHEDULER.lock();

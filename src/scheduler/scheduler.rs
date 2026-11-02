@@ -6,6 +6,7 @@ use lazy_static::lazy_static;
 use crate::process::process_manager::{switch_to, PROCESS_MANAGER};
 use crate::process::thread::ThreadState;
 use crate::sync::IrqSafeMutex;
+use x86_64::instructions::interrupts;
 
 const TIME_SLICE: u64 = 2; // Number of ticks before a thread is preempted
 
@@ -129,7 +130,22 @@ impl Scheduler {
     }
 }
 
+/// Pick the next thread and switch to it.
+///
+/// Runs with interrupts disabled from start to finish. `switch_to` marks the
+/// new thread as current before `switch_context` moves onto its stack. A
+/// timer interrupt in that gap would run the scheduler on the old thread's
+/// stack while `current` names the new thread, and `switch_context` would save
+/// the old stack pointer into the new thread's context. Each thread resumes
+/// with its own interrupt flag because `switch_context` saves and restores
+/// RFLAGS, and `without_interrupts` re-enables interrupts here if the caller
+/// had them on.
 pub fn schedule() {
+    interrupts::without_interrupts(schedule_with_interrupts_disabled);
+}
+
+fn schedule_with_interrupts_disabled() {
+    debug_assert!(!interrupts::are_enabled());
     let mut scheduler = SCHEDULER.lock();
     let next = scheduler.requeue_and_pick_next();
     if let Some(tid) = next {
@@ -144,19 +160,26 @@ pub fn yield_now() {
     schedule();
 }
 
+/// Put the current thread to sleep for `ticks` timer ticks.
+///
+/// Queuing the thread and switching away happen with interrupts disabled, so
+/// no interrupt can run the scheduler while the thread is marked Sleeping but
+/// still running.
 pub fn sleep(ticks: u64) {
-    let mut scheduler = SCHEDULER.lock();
-    if let Some(current_tid) = scheduler.get_current() {
-        debugln!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
-        let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
-        scheduler.sleep_queue.push(Reverse(SleepEntry {
-            wakeup_tick,
-            tid: current_tid.0,
-        }));
-        PROCESS_MANAGER.lock().sleep_thread(current_tid);
-        drop(scheduler);
-    } else {
-        panic!("No current thread to sleep");
-    }
-    schedule();
+    interrupts::without_interrupts(|| {
+        {
+            let mut scheduler = SCHEDULER.lock();
+            let current_tid = scheduler
+                .get_current()
+                .expect("No current thread to sleep");
+            debugln!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
+            let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
+            scheduler.sleep_queue.push(Reverse(SleepEntry {
+                wakeup_tick,
+                tid: current_tid.0,
+            }));
+            PROCESS_MANAGER.lock().sleep_thread(current_tid);
+        }
+        schedule_with_interrupts_disabled();
+    });
 }
