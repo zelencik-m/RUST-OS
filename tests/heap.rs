@@ -67,6 +67,6 @@ fn rescheduling_current_thread_keeps_it_running() {
 
     let (old_context, new_context) = manager.commit_switch(&mut scheduler, tid);
     assert_eq!(old_context as *const _, new_context);
-    assert_eq!(scheduler.current, Some(tid));
+    assert_eq!(scheduler.get_current(), Some(tid));
     assert_eq!(manager.get_thread_state(tid), ThreadState::Running);
 }

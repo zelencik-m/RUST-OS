@@ -12,7 +12,7 @@ use x86_64::VirtAddr;
 
 use crate::debugln;
 use crate::memory::address_space::AddressSpace;
-use crate::memory::memory_manager::{FaultAction, MEMORY_MANAGER, Oom};
+use crate::memory::memory_manager::{FaultAction, MemoryManager, MEMORY_MANAGER, Oom};
 use crate::memory::vma::VmaKind;
 use crate::process::elf_loader::load_elf;
 use crate::process::thread::{self, TID};
@@ -20,6 +20,27 @@ use crate::process::PID;
 use crate::scheduler::scheduler::SCHEDULER;
 
 use super::manager::PROCESS_MANAGER;
+
+/// Run `f` on `pid`'s address space and the memory manager.
+///
+/// Takes PROCESS_MANAGER then MEMORY_MANAGER, which is the documented lock
+/// order, and holds both for the duration of `f`. Returns `None` if the
+/// process has no user address space (kernel process).
+///
+/// Panics if the memory manager has not been initialized; that only happens
+/// if this is called before `rust_os::init`.
+fn with_space_and_mm<R>(
+    pid: PID,
+    f: impl FnOnce(&mut AddressSpace, &mut MemoryManager) -> R,
+) -> Option<R> {
+    let mut pm = PROCESS_MANAGER.lock();
+    let space = pm.process_mut(pid).address_space.as_mut()?;
+
+    let mut mm_guard = MEMORY_MANAGER.lock();
+    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
+
+    Some(f(space, mm))
+}
 
 pub fn create_thread(pid: PID, entry_point: extern "C" fn() -> !) -> TID {
     let mut scheduler = SCHEDULER.lock();
@@ -33,13 +54,13 @@ pub fn create_thread(pid: PID, entry_point: extern "C" fn() -> !) -> TID {
 pub fn remove_thread(tid: TID) {
     let mut scheduler = SCHEDULER.lock();
     assert!(
-        scheduler.current != Some(tid),
+        scheduler.get_current() != Some(tid),
         "remove_thread: refusing to free the stack of the currently running \
          thread (TID {:?}) — switch away first, then reap from a different \
          thread's stack (e.g. the parent, during wait())",
         tid
     );
-    scheduler.remove_from_runnables(tid);
+    scheduler.remove_from_queues(tid);
     drop(scheduler);
 
     PROCESS_MANAGER.lock().remove_thread_locked(tid);
@@ -68,7 +89,7 @@ pub fn switch_to(tid: TID) {
     let mut pm = PROCESS_MANAGER.lock();
 
     // The reaper skips the current thread because its kernel stack is active.
-    pm.reap_dead_threads(scheduler.current);
+    pm.reap_dead_threads(scheduler.get_current());
 
     let new_owner = pm.thread(tid).get_owner();
     let new_is_user = pm.thread(tid).is_user;
@@ -77,7 +98,7 @@ pub fn switch_to(tid: TID) {
     debugln!("Thread: {:?}, Process:{:?}", tid, new_owner);
 
     let changing = scheduler
-        .current
+        .get_current()
         .map(|c| pm.thread(c).get_owner() != new_owner)
         .unwrap_or(true);
 
@@ -123,7 +144,7 @@ pub fn destroy_process(pid: PID) {
     {
         let mut sched = SCHEDULER.lock();
         for t in &tids {
-            sched.remove_from_runnables(*t);
+            sched.remove_from_queues(*t);
         }
     }
     PROCESS_MANAGER.lock().destroy_process(pid);
@@ -144,16 +165,8 @@ pub fn spawn_elf(name: String, elf_bytes: &[u8]) -> Result<(PID, TID), Oom> {
     let pid = create_user_process(name)?;
 
     let entry_point = {
-        let mut pm = PROCESS_MANAGER.lock();
-        let space = pm
-            .process_mut(pid)
-            .address_space
-            .as_mut()
-            .expect("new user process has no address space");
-
-        let mut mm = MEMORY_MANAGER.lock();
-        let mm = mm.as_mut().expect("MemoryManager not initialized");
-        load_elf(elf_bytes, space, mm)
+        with_space_and_mm(pid, |space, mm| load_elf(elf_bytes, space, mm))
+            .expect("new user process has no address space")
     };
 
     match entry_point.and_then(|entry_point| create_user_thread(pid, entry_point)) {
@@ -172,14 +185,8 @@ pub fn map_user_region_for_process(
     leaf_flags: PageTableFlags,
     kind: VmaKind,
 ) -> Result<VirtAddr, Oom> {
-    let mut pm_guard = PROCESS_MANAGER.lock();
-    let proc = pm_guard.process_mut(pid);
-    let space = proc.address_space.as_mut().expect("Process has no address space");
-
-    let mut mm_guard = MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
-
-    mm.mmap(space, size, leaf_flags, kind)
+    with_space_and_mm(pid, |space, mm| mm.mmap(space, size, leaf_flags, kind))
+        .expect("Process has no address space")
 }
 
 pub fn register_vma_only(
@@ -189,21 +196,15 @@ pub fn register_vma_only(
     flags: PageTableFlags,
     kind: VmaKind,
 ) {
-    let mut pm_guard = PROCESS_MANAGER.lock();
-    let proc = pm_guard.process_mut(pid);
-    let space = proc.address_space.as_mut().expect("Process has no address space");
-
-    let mut mm_guard = MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
-
-    mm.register_vma(space, start, size, flags, kind);
+    with_space_and_mm(pid, |space, mm| mm.register_vma(space, start, size, flags, kind))
+        .expect("Process has no address space");
 }
 
 pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
     debugln!("Killing thread {:?}", tid);
     {
         let mut sched = SCHEDULER.lock();
-        sched.remove_from_runnables(tid);
+        sched.remove_from_queues(tid);
         // Keep this TID current until the switch: the reaper must not free the
         // kernel stack this code is using. commit_switch updates it on switch.
     }
@@ -216,34 +217,18 @@ pub fn kill_current_thread_and_schedule(tid: TID) -> ! {
     crate::hlt_loop();
 }
 
-pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, crate::memory::memory_manager::Oom> {
-    let mut pm_guard = PROCESS_MANAGER.lock();
-    let proc = pm_guard.process_mut(pid);
-    let space = proc.address_space.as_mut().expect("Process has no address space");
-
-    let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
-
-    mm.sys_brk(space, new_break)
+pub fn sys_brk(pid: PID, new_break: VirtAddr) -> Result<VirtAddr, Oom> {
+    with_space_and_mm(pid, |space, mm| mm.sys_brk(space, new_break))
+        .expect("Process has no address space")
 }
 
 pub fn demand_map_page(
     pid: PID,
     page_addr: VirtAddr,
     leaf_flags: PageTableFlags,
-) -> Result<(), crate::memory::memory_manager::Oom> {
-    let mut pm_guard = PROCESS_MANAGER.lock();
-
-    let proc = pm_guard.process_mut(pid);
-    let space = proc
-        .address_space
-        .as_mut()
-        .expect("Process has no address space");
-
-    let mut mm_guard = MEMORY_MANAGER.lock();
-    let mm = mm_guard.as_mut().expect("MemoryManager not initialized");
-
-    mm.demand_map_page(space, page_addr, leaf_flags)
+) -> Result<(), Oom> {
+    with_space_and_mm(pid, |space, mm| mm.demand_map_page(space, page_addr, leaf_flags))
+        .expect("Process has no address space")
 }
 
 pub fn handle_thread_page_fault(tid: TID, fault_addr: VirtAddr) -> (PID, FaultAction) {
@@ -289,29 +274,13 @@ pub fn sys_mmap_anonymous(
         return Err(Oom);
     }
 
-    let mut pm_guard = PROCESS_MANAGER.lock();
-
-    let proc = pm_guard.process_mut(pid);
-
-    let space = proc
-        .address_space
-        .as_mut()
-        .ok_or(Oom)?;
-
-    // Keep anonymous mappings away from the bottom-up brk region.
-    let start = space
-        .find_free_region_top_down(size as u64)
-        .ok_or(Oom)?;
-
-    let mut mm_guard = MEMORY_MANAGER.lock();
-
-    let mm = mm_guard
-        .as_mut()
-        .ok_or(Oom)?;
-
-    mm.mmap_at(space, start, size, flags, VmaKind::Mapped)?;
-
-    Ok(start)
+    with_space_and_mm(pid, |space, mm| {
+        // Keep anonymous mappings away from the bottom-up brk region.
+        let start = space.find_free_region_top_down(size as u64).ok_or(Oom)?;
+        mm.mmap_at(space, start, size, flags, VmaKind::Mapped)?;
+        Ok(start)
+    })
+    .ok_or(Oom)?
 }
 
 pub fn sys_munmap(
@@ -327,22 +296,5 @@ pub fn sys_munmap(
         return Err(Oom);
     }
 
-    let mut pm_guard = PROCESS_MANAGER.lock();
-
-    let proc = pm_guard.process_mut(pid);
-
-    let space = proc
-        .address_space
-        .as_mut()
-        .ok_or(Oom)?;
-
-    let mut mm_guard = MEMORY_MANAGER.lock();
-
-    let mm = mm_guard
-        .as_mut()
-        .ok_or(Oom)?;
-
-    mm.munmap(space, addr, size);
-
-    Ok(())
+    with_space_and_mm(pid, |space, mm| mm.munmap(space, addr, size)).ok_or(Oom)
 }

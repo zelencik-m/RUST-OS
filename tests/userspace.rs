@@ -100,7 +100,7 @@ extern "C" fn user_monitor() -> ! {
                 .expect("userspace monitor state missing")
                 .cases
                 .clone();
-            let ticks = SCHEDULER.lock().tick_count;
+            let ticks = SCHEDULER.lock().tick_count();
             (cases, ticks)
         });
 
@@ -126,7 +126,7 @@ extern "C" fn user_monitor() -> ! {
             let (out, err, no_longer_scheduled) = interrupts::without_interrupts(|| {
                 let scheduler = SCHEDULER.lock();
                 let finished =
-                    scheduler.current != Some(case.tid) && !scheduler.runnables.contains(&case.tid);
+                    scheduler.get_current() != Some(case.tid) && !scheduler.is_runnable(case.tid);
                 (read_inode(&case.stdout), read_inode(&case.stderr), finished)
             });
             let marker_seen = bytes_contain(&out, case.success_marker.as_bytes());
@@ -258,7 +258,7 @@ fn run_user_elf_smoke_programs() {
     });
     {
         let mut scheduler = SCHEDULER.lock();
-        scheduler.runnables.clear();
+        scheduler.clear_runnables();
         scheduler.add_runnable(monitor_tid);
         for case in &cases {
             scheduler.add_runnable(case.tid);

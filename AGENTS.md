@@ -13,7 +13,7 @@
 ## User programs (C → ELF)
 - `build.rs` compiles C programs with clang and links them with `user_programs/linker.ld` into `$OUT_DIR/<name>.elf`. The kernel and tests embed them with `include_bytes!(concat!(env!("OUT_DIR"), ...))`.
 - To add a program, add it to `PROGRAMS` in `build.rs` **and** embed it where it's used (`src/main.rs`, `tests/userspace.rs`, `tests/elf_images.rs`). The `userspace` runner expects exactly one `#[test_case]` and keys success off per-program output markers.
-- `user_programs/syscalls.h` duplicates syscall numbers from `src/syscall/numbers.rs` (Linux numbering plus custom `SYS_SLEEP_TICKS = 1000`). Keep them in sync manually.
+- Syscall numbers live only in `src/syscall/numbers.rs` (Linux numbering plus custom `SYS_SLEEP_TICKS = 1000`). `build.rs` generates `$OUT_DIR/syscall_numbers.h` from it (lines of the form `pub const SYS_X: u64 = N;`), which `user_programs/syscalls.h` includes.
 - C code must stay freestanding (no SSE, no red zone, large code model). User programs load at `0x00007F8000100000` (P4 slot 255).
 
 ## Runtime gotchas

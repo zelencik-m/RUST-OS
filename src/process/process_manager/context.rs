@@ -10,7 +10,7 @@ impl ProcessManager {
         scheduler: &mut Scheduler,
         tid: TID,
     ) -> (*mut ThreadContext, *const ThreadContext) {
-        let old_ctx: *mut ThreadContext = match scheduler.current {
+        let old_ctx: *mut ThreadContext = match scheduler.get_current() {
             Some(cur) => {
                 let t = self.thread_mut(cur);
                 if t.get_state() == ThreadState::Running {
@@ -30,7 +30,7 @@ impl ProcessManager {
             t.context_ptr()
         };
 
-        scheduler.current = Some(tid);
+        scheduler.set_current(tid);
         (old_ctx, new_ctx)
     }
 }
