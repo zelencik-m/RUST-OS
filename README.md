@@ -32,7 +32,7 @@ binary have their unit-test harnesses disabled; tests are integration targets.
 
 The finite C smoke tests live in `tests/user_programs/`. Run them with
 `cargo test --test userspace`; the test kernel reports the results and exits
-QEMU once the five programs finish, or fails on an error or timeout.
+QEMU once all the programs finish, or fails on an error or timeout.
 
 The `thread_b` and `thread_c` scheduler demos live in `user_programs/` and are
 part of normal kernel execution. `cargo run` launches both; they print and sleep

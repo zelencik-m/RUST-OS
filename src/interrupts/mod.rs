@@ -76,6 +76,35 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let fault_addr = Cr2::read();
 
+    // The kernel never relies on hardware page faults to touch user memory:
+    // `uaccess` and the ELF loader translate user addresses in software and
+    // go through the physical-memory map. Any fault raised in ring 0 is
+    // therefore a kernel bug. Check this before taking any lock, because the
+    // faulting kernel code may already hold SCHEDULER or PROCESS_MANAGER.
+    if !error_code.contains(PageFaultErrorCode::USER_MODE) {
+        panic!(
+            "EXCEPTION: PAGE FAULT in kernel mode\naddr: {:?}\nerr:  {:?}\n{:#?}",
+            fault_addr, error_code, stack_frame
+        );
+    }
+
+    // A protection violation means the page is present but the access is not
+    // allowed (e.g. write to read-only, execute on NX). Demand paging cannot
+    // fix that, so do not try to map a page over it.
+    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+        let tid = SCHEDULER
+            .lock()
+            .get_current()
+            .expect("user-mode page fault with no current thread");
+        crate::debugln!(
+            "PAGE FAULT: protection violation, killing TID({:?})\n  addr: {:?}\n  err:  {:?}",
+            tid,
+            fault_addr,
+            error_code
+        );
+        crate::process::process_manager::kill_current_thread_and_schedule(tid);
+    }
+
     let tid = match SCHEDULER.lock().get_current() {
         Some(t) => t,
         None => panic!(

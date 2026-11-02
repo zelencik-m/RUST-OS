@@ -7,4 +7,5 @@ build-std-features = ["compiler-builtins-mem"]
 json-target-spec = true
 
 [target.x86_64-blog_os]
-runner = "bootimage runner"
+# Stages a scratch copy of ext2.img in target/ before booting QEMU.
+runner = "scripts/qemu-runner.sh"

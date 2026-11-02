@@ -153,14 +153,26 @@ impl AtaPioDisk {
         Ok(())
     }
 
-    fn read_chunk(&self, lba: u64, sectors: usize, buf: &mut [u8]) -> Result<(), FsError> {
+    /// Select the drive, program a 28-bit LBA transfer, and send `command`.
+    ///
+    /// The drive ignores register writes while BSY is set, so wait for it to
+    /// go idle both before and after selecting the drive.
+    fn issue_command(&self, command: u8, lba: u64, sectors: usize) -> Result<(), FsError> {
+        self.wait_not_busy()?;
         self.write_device(self.drive_select | ((lba >> 24) as u8 & 0x0F));
         self.delay_400ns();
+        self.wait_not_busy()?;
+
         self.write_sector_count(sectors as u8);
         self.write_lba_low((lba & 0xFF) as u8);
         self.write_lba_mid(((lba >> 8) & 0xFF) as u8);
         self.write_lba_high(((lba >> 16) & 0xFF) as u8);
-        self.write_command(ATA_CMD_READ_SECTORS);
+        self.write_command(command);
+        Ok(())
+    }
+
+    fn read_chunk(&self, lba: u64, sectors: usize, buf: &mut [u8]) -> Result<(), FsError> {
+        self.issue_command(ATA_CMD_READ_SECTORS, lba, sectors)?;
 
         let mut data = Port::<u16>::new(self.io_base);
         for sector in 0..sectors {
@@ -180,13 +192,7 @@ impl AtaPioDisk {
     }
 
     fn write_chunk(&self, lba: u64, sectors: usize, buf: &[u8]) -> Result<(), FsError> {
-        self.write_device(self.drive_select | ((lba >> 24) as u8 & 0x0F));
-        self.delay_400ns();
-        self.write_sector_count(sectors as u8);
-        self.write_lba_low((lba & 0xFF) as u8);
-        self.write_lba_mid(((lba >> 8) & 0xFF) as u8);
-        self.write_lba_high(((lba >> 16) & 0xFF) as u8);
-        self.write_command(ATA_CMD_WRITE_SECTORS);
+        self.issue_command(ATA_CMD_WRITE_SECTORS, lba, sectors)?;
 
         let mut data = Port::<u16>::new(self.io_base);
         for sector in 0..sectors {

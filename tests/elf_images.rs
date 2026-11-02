@@ -54,6 +54,10 @@ fn embedded_user_programs_are_x86_64_elfs() {
             "fs_tree_test",
             include_bytes!(concat!(env!("OUT_DIR"), "/fs_tree_test.elf")) as &[u8],
         ),
+        (
+            "nx_exec_test",
+            include_bytes!(concat!(env!("OUT_DIR"), "/nx_exec_test.elf")) as &[u8],
+        ),
     ] {
         assert_x86_64_elf(name, image);
     }

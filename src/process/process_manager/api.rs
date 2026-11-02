@@ -54,13 +54,13 @@ pub fn create_idle_thread(entry: extern "C" fn() -> !) -> TID {
     tid
 }
 
-pub fn create_user_thread(pid: PID, entry_point: VirtAddr) -> TID {
+pub fn create_user_thread(pid: PID, entry_point: VirtAddr) -> Result<TID, Oom> {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
-    let tid = pm.create_user_thread_locked(pid, entry_point);
+    let tid = pm.create_user_thread_locked(pid, entry_point)?;
     drop(pm);
     scheduler.add_runnable(tid);
-    tid
+    Ok(tid)
 }
 
 pub fn switch_to(tid: TID) {
@@ -129,19 +129,19 @@ pub fn destroy_process(pid: PID) {
     PROCESS_MANAGER.lock().destroy_process(pid);
 }
 
-pub fn create_user_process(name: String) -> PID {
+pub fn create_user_process(name: String) -> Result<PID, Oom> {
     let space = {
         let mut mm = MEMORY_MANAGER.lock();
         let mm = mm.as_mut().expect("MemoryManager not initialized");
-        AddressSpace::new(&mut mm.frame_allocator, mm.physical_memory_offset)
+        AddressSpace::try_new(&mut mm.frame_allocator, mm.physical_memory_offset).ok_or(Oom)?
     };
-    PROCESS_MANAGER.lock().create_user_process_with_space(PID(0), name, space)
+    Ok(PROCESS_MANAGER.lock().create_user_process_with_space(PID(0), name, space))
 }
 
 /// Create a user process, load an ELF image into its private address space,
 /// and enqueue a user thread at the ELF entry point.
 pub fn spawn_elf(name: String, elf_bytes: &[u8]) -> Result<(PID, TID), Oom> {
-    let pid = create_user_process(name);
+    let pid = create_user_process(name)?;
 
     let entry_point = {
         let mut pm = PROCESS_MANAGER.lock();
@@ -156,11 +156,8 @@ pub fn spawn_elf(name: String, elf_bytes: &[u8]) -> Result<(PID, TID), Oom> {
         load_elf(elf_bytes, space, mm)
     };
 
-    match entry_point {
-        Ok(entry_point) => {
-            let tid = create_user_thread(pid, entry_point);
-            Ok((pid, tid))
-        }
+    match entry_point.and_then(|entry_point| create_user_thread(pid, entry_point)) {
+        Ok(tid) => Ok((pid, tid)),
         Err(error) => {
             destroy_process(pid);
             Err(error)

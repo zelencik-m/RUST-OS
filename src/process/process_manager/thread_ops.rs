@@ -4,7 +4,7 @@ use x86_64::VirtAddr;
 use alloc::collections::VecDeque;
 use crate::process::thread::{TID, Thread, ThreadState};
 use crate::process::PID;
-use crate::memory::memory_manager::MEMORY_MANAGER;
+use crate::memory::memory_manager::{MEMORY_MANAGER, Oom};
 use super::manager::ProcessManager;
 
 impl ProcessManager {
@@ -34,26 +34,26 @@ impl ProcessManager {
         tid
     }
 
-    pub fn create_user_thread_locked(&mut self, pid: PID, entry_point: VirtAddr) -> TID {
+    pub fn create_user_thread_locked(&mut self, pid: PID, entry_point: VirtAddr) -> Result<TID, Oom> {
+        // Allocate the user stack before taking a TID, so a failure does not
+        // leak a recycled TID slot.
+        let user_stack = {
+            let space = self
+                .process_mut(pid)
+                .address_space
+                .as_mut()
+                .expect("create_user_thread_locked: process has no address space");
+            let mut mm_guard = MEMORY_MANAGER.lock();
+            let mm = mm_guard.as_mut().ok_or(Oom)?;
+            mm.allocate_user_stack(space)?
+        };
+
         let tid = if let Some(free_tid) = self.free_tids.pop() {
             free_tid
         } else {
             TID(self.threads.len() as u64)
         };
 
-        let proc = self.process_mut(pid);
-        let user_stack_top = if let Some(space) = proc.address_space.as_mut() {
-            let mut mm_guard = MEMORY_MANAGER.lock();
-            if let Some(mm) = mm_guard.as_mut() {
-                mm.allocate_user_stack(space).ok()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let user_stack = user_stack_top.expect("Failed to allocate user stack for user thread");
         let thread = Box::new(Thread::new_user(tid, pid, 4096 * 4, entry_point, user_stack));
 
         if (tid.0 as usize) < self.threads.len() {
@@ -63,7 +63,7 @@ impl ProcessManager {
         }
 
         self.process_mut(pid).threads.push(tid);
-        tid
+        Ok(tid)
     }
 
     pub fn create_idle_thread_locked(&mut self, entry: extern "C" fn() -> !) -> TID {

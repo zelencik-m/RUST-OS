@@ -5,6 +5,12 @@ use crate::memory::vma::VmaKind;
 use crate::memory::VmArea;
 use x86_64::{structures::paging::PageTableFlags, VirtAddr};
 
+/// Flags for user stack and heap pages: writable data, never executable (W^X).
+const USER_DATA_FLAGS: PageTableFlags = PageTableFlags::PRESENT
+    .union(PageTableFlags::WRITABLE)
+    .union(PageTableFlags::USER_ACCESSIBLE)
+    .union(PageTableFlags::NO_EXECUTE);
+
 impl MemoryManager {
     pub fn allocate_user_stack(&mut self, space: &mut AddressSpace) -> Result<VirtAddr, Oom> {
         const STACK_PAGES: usize = 16; // 64KB stack
@@ -27,7 +33,7 @@ impl MemoryManager {
         
         self.mmap_at(
             space, stack_start, stack_size, 
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE, 
+            USER_DATA_FLAGS, 
             VmaKind::Stack
         )?;
 
@@ -51,7 +57,7 @@ impl MemoryManager {
                 let size = (map_end.as_u64() - map_start.as_u64()) as usize;
                 self.mmap_at(
                     space, map_start, size,
-                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+                    USER_DATA_FLAGS,
                     VmaKind::Heap,
                 )?;
             }

@@ -22,6 +22,12 @@ use x86_64::instructions::interrupts;
 
 entry_point!(test_kernel_main);
 
+/// The PIT runs at its default ~18.2 Hz, so this is roughly 110 s of guest
+/// time. QEMU's emulated timer slows down when the host is busy (e.g. many
+/// suites back to back, or x86 emulation on an ARM host), so keep this
+/// generous; bootimage's own 300 s timeout still bounds a real hang.
+const USER_TEST_TIMEOUT_TICKS: u64 = 2000;
+
 #[repr(C, align(8))]
 struct AlignedElf<const N: usize>([u8; N]);
 
@@ -43,6 +49,7 @@ elf!(SYSCALL, "syscall_test");
 elf!(VFS_TEST, "vfs_test");
 elf!(FS_TREE, "fs_tree_test");
 elf!(RING3_EXCEPTION, "ring3_exception_test");
+elf!(NX_EXEC, "nx_exec_test");
 
 #[derive(Clone)]
 struct UserCase {
@@ -97,7 +104,7 @@ extern "C" fn user_monitor() -> ! {
             (cases, ticks)
         });
 
-        if elapsed > 500 {
+        if elapsed > USER_TEST_TIMEOUT_TICKS {
             for case in &cases {
                 let (out, err) = interrupts::without_interrupts(|| {
                     (read_inode(&case.stdout), read_inode(&case.stderr))
@@ -232,6 +239,12 @@ fn run_user_elf_smoke_programs() {
         "ring3_exception_test",
         &RING3_EXCEPTION.0,
         "Triggering a Ring-3 page fault",
+        &root,
+    ));
+    cases.push(add_case(
+        "nx_exec_test",
+        &NX_EXEC.0,
+        "Attempting to execute non-executable stack memory",
         &root,
     ));
 

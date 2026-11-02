@@ -45,9 +45,13 @@ pub struct AddressSpace {
 
 impl AddressSpace {
     pub fn new(fa: &mut impl FrameAllocator<Size4KiB>, off: VirtAddr) -> Self {
-        let p4_frame = fa
-            .allocate_frame()
-            .expect("AddressSpace::new: failed to allocate P4 frame");
+        Self::try_new(fa, off).expect("AddressSpace::new: failed to allocate P4 frame")
+    }
+
+    /// Like `new`, but returns `None` instead of panicking when no frame is
+    /// available for the P4 table.
+    pub fn try_new(fa: &mut impl FrameAllocator<Size4KiB>, off: VirtAddr) -> Option<Self> {
+        let p4_frame = fa.allocate_frame()?;
 
         let p4_ptr = (off + p4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
 
@@ -78,11 +82,11 @@ impl AddressSpace {
             p4[i] = kernel_p4[i].clone();
         }
 
-        AddressSpace {
+        Some(AddressSpace {
             p4_frame,
             vmas: Vec::new(),
             heap_break: VirtAddr::new(USER_SPACE_START),
-        }
+        })
     }
 
     /// Build a mapper for this address space, active or not.
