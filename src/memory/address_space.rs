@@ -1,11 +1,8 @@
-// src/memory/address_space.rs
-
 use core::ptr;
 use alloc::vec::Vec;
 use x86_64::{
     structures::paging::{
-        FrameAllocator, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame, Size4KiB,
-        Mapper,
+        FrameAllocator, OffsetPageTable, PageTable, PageTableFlags, PhysFrame, Size4KiB,
     },
     VirtAddr,
 };
@@ -14,10 +11,7 @@ use x86_64::PhysAddr;
 use crate::memory::paging::active_level_4_table;
 use crate::memory::vma::VmArea;
 
-/// Temporary compatibility layout:
-///
-/// We keep low-half kernel mappings shared, because the kernel is not fully
-/// higher-half yet. User memory is isolated in a dedicated P4 slot.
+/// Low-half kernel mappings remain shared until the kernel moves higher-half.
 pub const USER_P4_START: usize = 255;
 pub const USER_P4_END: usize = 256; // exclusive
 
@@ -29,20 +23,18 @@ pub const USER_SPACE_START: u64 = (USER_P4_START as u64) << 39;
 pub const USER_SPACE_END: u64 = ((USER_P4_END as u64) << 39) - 0x1000;
 
 pub fn is_user_range(start: VirtAddr, size: u64) -> bool {
+    let start_u64 = start.as_u64();
+    let user_start = USER_SPACE_START;
+    let user_end_exclusive = (USER_P4_END as u64) << 39;
+
     if size == 0 {
         return true;
     }
 
-    let start_u64 = start.as_u64();
-
-    let Some(end_u64) = start_u64.checked_add(size - 1) else {
+    let Some(end_exclusive) = start_u64.checked_add(size) else {
         return false;
     };
-
-    let start_p4 = (start_u64 >> 39) & 0x1FF;
-    let end_p4 = (end_u64 >> 39) & 0x1FF;
-
-    start_p4 >= USER_P4_START as u64 && end_p4 < USER_P4_END as u64
+    start_u64 >= user_start && end_exclusive <= user_end_exclusive
 }
 
 pub struct AddressSpace {
@@ -53,9 +45,13 @@ pub struct AddressSpace {
 
 impl AddressSpace {
     pub fn new(fa: &mut impl FrameAllocator<Size4KiB>, off: VirtAddr) -> Self {
-        let p4_frame = fa
-            .allocate_frame()
-            .expect("AddressSpace::new: failed to allocate P4 frame");
+        Self::try_new(fa, off).expect("AddressSpace::new: failed to allocate P4 frame")
+    }
+
+    /// Like `new`, but returns `None` instead of panicking when no frame is
+    /// available for the P4 table.
+    pub fn try_new(fa: &mut impl FrameAllocator<Size4KiB>, off: VirtAddr) -> Option<Self> {
+        let p4_frame = fa.allocate_frame()?;
 
         let p4_ptr = (off + p4_frame.start_address().as_u64()).as_mut_ptr::<PageTable>();
 
@@ -71,10 +67,8 @@ impl AddressSpace {
         let p4: &mut PageTable = unsafe { &mut *p4_ptr };
         let kernel_p4 = unsafe { active_level_4_table(off) };
 
-        // Compatibility mode:
-        //
-        // Clone low-half kernel mappings too, because the kernel image/statics
-        // are still low-half. But DO NOT clone the private user P4 slot.
+        // The kernel image and statics still use low-half mappings; keep the
+        // private user P4 slot separate.
         for i in 0..KERNEL_P4_START {
             if i >= USER_P4_START && i < USER_P4_END {
                 continue;
@@ -88,15 +82,15 @@ impl AddressSpace {
             p4[i] = kernel_p4[i].clone();
         }
 
-        AddressSpace {
+        Some(AddressSpace {
             p4_frame,
             vmas: Vec::new(),
             heap_break: VirtAddr::new(USER_SPACE_START),
-        }
+        })
     }
 
-    /// Build a mapper for an address space that may or may not be active.
-    /// Tied to &mut self to prevent multiple simultaneous mutable borrows.
+    /// Build a mapper for this address space, active or not.
+    /// The mutable borrow prevents simultaneous mappers for the same space.
     pub unsafe fn mapper(&mut self, off: VirtAddr) -> OffsetPageTable<'_> {
         let p4_ptr = (off + self.p4_frame.start_address().as_u64()).as_mut_ptr();
         let p4: &mut PageTable = &mut *p4_ptr;

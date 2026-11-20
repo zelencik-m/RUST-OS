@@ -1,5 +1,3 @@
-// src/memory/paging.rs
-
 use x86_64::{
     structures::paging::{
         FrameAllocator, Mapper, OffsetPageTable, Page, PageTable,

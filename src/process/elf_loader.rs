@@ -1,5 +1,3 @@
-// src/process/elf_loader.rs
-
 use x86_64::{
     structures::paging::{Page, PageTableFlags, Size4KiB},
     VirtAddr,
@@ -79,7 +77,6 @@ pub fn load_elf(
 
         mm.mmap_at(space, start, size, pt_flags, kind)?;
 
-        // Copy the file-backed part of the segment.
         if file_size > 0 {
             let src_start = offset as usize;
             let src_end = src_start
@@ -107,7 +104,6 @@ pub fn load_elf(
             )?;
         }
 
-        // Zero the BSS / memory_size > file_size portion.
         if mem_size > file_size {
             let bss_addr = virt_addr
                 .checked_add(file_size)

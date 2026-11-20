@@ -1,5 +1,3 @@
-// src/fs/mod.rs
-
 #![allow(dead_code)]
 
 pub mod error;
@@ -24,14 +22,12 @@ pub use block_device::BlockDevice;
 pub use ata_pio::AtaPioDisk;
 pub use ext2::Ext2Fs;
 
-use crate::serial_println;
-
 use alloc::sync::Arc;
 
 /// Initialize the filesystem stack with the ext2 disk as the VFS root.
 ///
-/// The disk is expected on the secondary ATA master. Keep the boot medium on
-/// another device so the filesystem image can be attached independently.
+/// The filesystem image is on the secondary ATA master, separate from the
+/// boot medium.
 pub fn init() -> Result<(), FsError> {
     let device = Arc::new(AtaPioDisk::secondary_master());
     let ext2 = Ext2Fs::mount(device)?;

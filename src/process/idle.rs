@@ -1,5 +1,3 @@
-// src/process/idle.rs
-
 use core::arch::asm;
 
 pub extern "C" fn idle_loop() -> ! {

@@ -1,5 +1,3 @@
-// src/allocator/buddy_allocator.rs
-
 use alloc::alloc::{GlobalAlloc, Layout};
 
 use super::{Locked, align_up};
@@ -214,8 +212,7 @@ impl BuddyAllocator {
         loop {
             let current = &mut *slot;
 
-            // Read the node pointer in a block so the mutable borrow ends
-            // before we potentially modify the slot.
+            // End the borrow before modifying the slot.
             let node_ptr: *mut ListNode = {
                 let node = current.as_mut()?;
                 *node as *mut ListNode
@@ -241,7 +238,7 @@ impl BuddyAllocator {
             let block_size = self.order_to_size(order);
             let mut count = 0;
             
-            // Traverse using raw pointers to avoid modifying the list
+            // Inspect the list without taking ownership of its nodes.
             let mut current: *const ListNode = match self.free_lists[order].as_ref() {
                 Some(node) => *node as *const ListNode,
                 None => core::ptr::null(),

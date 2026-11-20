@@ -1,5 +1,3 @@
-// src/fs/ata+=_pio.rs
-
 use crate::sync::IrqSafeMutex;
 use x86_64::instructions::port::Port;
 
@@ -19,9 +17,8 @@ const ATA_CMD_CACHE_FLUSH: u8 = 0xE7;
 
 /// Legacy ATA PIO disk using 28-bit LBA.
 ///
-/// This is intentionally simple: polling, no DMA, no IRQs. That is enough for
-/// a first filesystem implementation and works well with QEMU's legacy IDE
-/// controller when an IDE disk is attached.
+/// Uses polling without DMA or interrupts, suitable for QEMU's legacy IDE
+/// controller.
 pub struct AtaPioDisk {
     io_base: u16,
     control_base: u16,
@@ -42,8 +39,7 @@ impl AtaPioDisk {
 
     /// Secondary-master ATA disk (0x170 / 0x376).
     ///
-    /// The recommended QEMU setup attaches the ext2 image here so the kernel's
-    /// boot device can remain separate from the filesystem disk.
+    /// Attach the ext2 image here to keep it separate from the boot device.
     pub const fn secondary_master() -> Self {
         Self {
             io_base: 0x170,
@@ -105,11 +101,10 @@ impl AtaPioDisk {
     }
 
     fn wait_not_busy(&self) -> Result<u8, FsError> {
-        let mut last = 0u8;
         for _ in 0..10_000_000usize {
-            last = self.read_status();
-            if (last & ATA_STATUS_BSY) == 0 {
-                return Ok(last);
+            let status = self.read_status();
+            if (status & ATA_STATUS_BSY) == 0 {
+                return Ok(status);
             }
             core::hint::spin_loop();
         }
@@ -158,14 +153,26 @@ impl AtaPioDisk {
         Ok(())
     }
 
-    fn read_chunk(&self, lba: u64, sectors: usize, buf: &mut [u8]) -> Result<(), FsError> {
+    /// Select the drive, program a 28-bit LBA transfer, and send `command`.
+    ///
+    /// The drive ignores register writes while BSY is set, so wait for it to
+    /// go idle both before and after selecting the drive.
+    fn issue_command(&self, command: u8, lba: u64, sectors: usize) -> Result<(), FsError> {
+        self.wait_not_busy()?;
         self.write_device(self.drive_select | ((lba >> 24) as u8 & 0x0F));
         self.delay_400ns();
+        self.wait_not_busy()?;
+
         self.write_sector_count(sectors as u8);
         self.write_lba_low((lba & 0xFF) as u8);
         self.write_lba_mid(((lba >> 8) & 0xFF) as u8);
         self.write_lba_high(((lba >> 16) & 0xFF) as u8);
-        self.write_command(ATA_CMD_READ_SECTORS);
+        self.write_command(command);
+        Ok(())
+    }
+
+    fn read_chunk(&self, lba: u64, sectors: usize, buf: &mut [u8]) -> Result<(), FsError> {
+        self.issue_command(ATA_CMD_READ_SECTORS, lba, sectors)?;
 
         let mut data = Port::<u16>::new(self.io_base);
         for sector in 0..sectors {
@@ -185,13 +192,7 @@ impl AtaPioDisk {
     }
 
     fn write_chunk(&self, lba: u64, sectors: usize, buf: &[u8]) -> Result<(), FsError> {
-        self.write_device(self.drive_select | ((lba >> 24) as u8 & 0x0F));
-        self.delay_400ns();
-        self.write_sector_count(sectors as u8);
-        self.write_lba_low((lba & 0xFF) as u8);
-        self.write_lba_mid(((lba >> 8) & 0xFF) as u8);
-        self.write_lba_high(((lba >> 16) & 0xFF) as u8);
-        self.write_command(ATA_CMD_WRITE_SECTORS);
+        self.issue_command(ATA_CMD_WRITE_SECTORS, lba, sectors)?;
 
         let mut data = Port::<u16>::new(self.io_base);
         for sector in 0..sectors {
@@ -251,7 +252,5 @@ impl BlockDevice for AtaPioDisk {
     }
 }
 
-// Keep these constants referenced so rustc does not warn when extending the
-// polling code later.
 #[allow(dead_code)]
 const _ATA_STATUS_UNUSED: u8 = ATA_STATUS_SRV | ATA_STATUS_RDY;

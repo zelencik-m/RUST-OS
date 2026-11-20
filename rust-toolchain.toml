@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned so build-std / json-target-spec breakage in newer nightlies cannot
+# silently break the build. Bump deliberately and rerun `cargo test`.
+channel = "nightly-2026-07-10"
+components = ["rust-src", "llvm-tools-preview"]
+profile = "minimal"

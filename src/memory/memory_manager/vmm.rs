@@ -1,5 +1,3 @@
-// src/memory/memory_manager/vmm.rs
-
 use super::MemoryManager;
 use crate::memory::address_space::AddressSpace;
 use crate::memory::vma::{VmArea, VmaKind};
@@ -30,7 +28,6 @@ impl MemoryManager {
         let start_page = Page::<Size4KiB>::containing_address(start);
         let end_page = Page::<Size4KiB>::containing_address(start + (size as u64 - 1));
 
-        // 1. Allocate all frames first (Transactional)
         let mut frames = Vec::new();
         for _ in Page::range_inclusive(start_page, end_page) {
             match self.frame_allocator.allocate_frame() {
@@ -45,7 +42,6 @@ impl MemoryManager {
             }
         }
 
-        // 2. Now map them (Mapping rarely fails unless there's a bug in our logic)
         let parent_flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE;
         let mut mapper = unsafe { space.mapper(self.physical_memory_offset) };
         let mut frames_iter = frames.into_iter();
@@ -82,7 +78,6 @@ impl MemoryManager {
             }
         }
 
-        // 3. Commit the VMA
         space.vmas.push(VmArea { start, size: size as u64, flags, kind });
         Ok(start)
     }
@@ -161,7 +156,7 @@ impl MemoryManager {
         Ok(())
     }
 
-    /// Upgraded munmap that correctly shrinks and splits VMAs.
+    /// Unmap pages and shrink or split overlapping VMAs.
     pub fn munmap(&mut self, space: &mut AddressSpace, addr: VirtAddr, size: usize) {
         if size == 0 { return; }
 
@@ -179,7 +174,6 @@ impl MemoryManager {
         let unmap_start = addr.as_u64();
         let unmap_end = unmap_start + size as u64;
 
-        // Smart VMA shrink/split logic
         let mut new_vmas = Vec::new();
         for mut vma in space.vmas.drain(..) {
             let vma_start = vma.start.as_u64();

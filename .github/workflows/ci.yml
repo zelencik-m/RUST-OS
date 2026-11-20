@@ -1,0 +1,34 @@
+name: kernel-tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  qemu-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs the nightly and components pinned in rust-toolchain.toml.
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Install QEMU and Clang
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 clang
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml') }}
+
+      - name: Install bootimage
+        run: cargo install bootimage
+
+      - name: Run kernel tests in QEMU
+        run: cargo test
+        timeout-minutes: 30

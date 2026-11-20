@@ -1,5 +1,3 @@
-// src/fs/ext2/ondisk.rs
-
 use super::super::error::FsError;
 
 pub const EXT2_SUPER_MAGIC: u16 = 0xEF53;
@@ -107,7 +105,6 @@ pub fn parse(buf: &[u8]) -> Result<Self, FsError> {
     }
 
     pub fn supports_implemented_format(&self) -> bool {
-        // Keep this kernel filesystem intentionally limited to classic ext2.
         const COMPAT_HAS_JOURNAL: u32 = 0x0004;
         const INCOMPAT_FILETYPE: u32 = 0x0002;
         const INCOMPAT_EXTENTS: u32 = 0x0040;

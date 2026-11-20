@@ -1,11 +1,22 @@
-// src/debug/mod.rs
-
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use uart_16550::SerialPort;
 
 mod macros;
+
+// Debug logging is opt-in. Normal kernel boot enables it explicitly, while
+// integration-test kernels leave it disabled to keep their reports focused.
+static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_enabled(enabled: bool) {
+    DEBUG_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn is_enabled() -> bool {
+    DEBUG_ENABLED.load(Ordering::Relaxed)
+}
 
 lazy_static! {
     static ref SERIAL: Mutex<SerialPort> = {
@@ -17,8 +28,11 @@ lazy_static! {
 
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
+    if !is_enabled() {
+        return;
+    }
+
     use core::fmt::Write;
-    use core::sync::atomic::Ordering;
     use x86_64::instructions::interrupts;
     use x86_64::registers::control::Cr3;
     use x86_64::structures::paging::{PhysFrame, Size4KiB};

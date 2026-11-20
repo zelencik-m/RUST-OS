@@ -1,5 +1,3 @@
-// src/interrupts/mod.rs
-
 pub mod gdt;
 
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
@@ -13,7 +11,6 @@ use crate::serial_println;
 use crate::scheduler::scheduler::{SCHEDULER, yield_now};
 use crate::PROCESS_MANAGER;
 use crate::syscall::entry;
-use crate::syscall::numbers::SYS_EXIT;
 use core::arch::global_asm;
 
 pub const PIC_1_OFFSET: u8 = 32;
@@ -79,6 +76,35 @@ extern "x86-interrupt" fn page_fault_handler(
 
     let fault_addr = Cr2::read();
 
+    // The kernel never relies on hardware page faults to touch user memory:
+    // `uaccess` and the ELF loader translate user addresses in software and
+    // go through the physical-memory map. Any fault raised in ring 0 is
+    // therefore a kernel bug. Check this before taking any lock, because the
+    // faulting kernel code may already hold SCHEDULER or PROCESS_MANAGER.
+    if !error_code.contains(PageFaultErrorCode::USER_MODE) {
+        panic!(
+            "EXCEPTION: PAGE FAULT in kernel mode\naddr: {:?}\nerr:  {:?}\n{:#?}",
+            fault_addr, error_code, stack_frame
+        );
+    }
+
+    // A protection violation means the page is present but the access is not
+    // allowed (e.g. write to read-only, execute on NX). Demand paging cannot
+    // fix that, so do not try to map a page over it.
+    if error_code.contains(PageFaultErrorCode::PROTECTION_VIOLATION) {
+        let tid = SCHEDULER
+            .lock()
+            .get_current()
+            .expect("user-mode page fault with no current thread");
+        crate::debugln!(
+            "PAGE FAULT: protection violation, killing TID({:?})\n  addr: {:?}\n  err:  {:?}",
+            tid,
+            fault_addr,
+            error_code
+        );
+        crate::process::process_manager::kill_current_thread_and_schedule(tid);
+    }
+
     let tid = match SCHEDULER.lock().get_current() {
         Some(t) => t,
         None => panic!(
@@ -98,36 +124,36 @@ extern "x86-interrupt" fn page_fault_handler(
         }
 
         FaultAction::Guard => {
-            serial_println!(
+            crate::debugln!(
                 "PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})",
                 owner.0,
                 tid
             );
-            serial_println!("  faulting addr: {:?}", fault_addr);
+            crate::debugln!("  faulting addr: {:?}", fault_addr);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
 
         FaultAction::Segfault => {
-            serial_println!(
+            crate::debugln!(
                 "PAGE FAULT: killing PID({}), TID({:?})",
                 owner.0,
                 tid
             );
-            serial_println!("  faulting addr: {:?}", fault_addr);
-            serial_println!("  error code:    {:?}", error_code);
-            serial_println!("{:#?}", stack_frame);
+            crate::debugln!("  faulting addr: {:?}", fault_addr);
+            crate::debugln!("  error code:    {:?}", error_code);
+            crate::debugln!("{:#?}", stack_frame);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
 
         FaultAction::Oom => {
-            serial_println!(
+            crate::debugln!(
                 "PAGE FAULT: OOM while mapping PID({}), TID({:?})",
                 owner.0,
                 tid
             );
-            serial_println!("  faulting addr: {:?}", fault_addr);
+            crate::debugln!("  faulting addr: {:?}", fault_addr);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
@@ -148,7 +174,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
             HandleControl::Ignore,
         ));
 
-    let keyboard = KEYBOARD.lock();
+    let _keyboard = KEYBOARD.lock();
     let mut port = Port::new(0x60);
 
     let scancode: u8 = unsafe { port.read() };
@@ -177,7 +203,6 @@ global_asm!(
     "push r10",
     "push r11",
     
-    // Call the Rust handler
     "call timer_interrupt_rust_handler",
     
     // Pop caller-saved registers (restores the new thread's state)
@@ -236,24 +261,20 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    // Check the Code Segment (CS) register to see what Ring we were in.
-    // The bottom 2 bits of CS represent the Requested Privilege Level (RPL).
+    // The low two bits of CS identify the interrupted privilege level.
     let cs = stack_frame.code_segment;
     
     if cs & 0x3 == 3 {
-        // We are in Ring 3 (User Mode)! The user program did something illegal.
         let tid = SCHEDULER.lock().get_current().expect("No current thread during #GP");
         let owner = PROCESS_MANAGER.lock().thread(tid).get_owner();
         
-        serial_println!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
-        serial_println!("  Killing PID({}), TID({:?})", owner.0, tid);
-        serial_println!("  Error Code: {:#x}", error_code);
-        serial_println!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
+        crate::debugln!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
+        crate::debugln!("  Killing PID({}), TID({:?})", owner.0, tid);
+        crate::debugln!("  Error Code: {:#x}", error_code);
+        crate::debugln!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
         
-        // Kill the thread and seamlessly switch to the next one
         crate::process::process_manager::kill_current_thread_and_schedule(tid);
     } else {
-        // We are in Ring 0 (Kernel Mode)! The kernel did something wrong. This is fatal.
         panic!(
             "\n!!! KERNEL EXCEPTION: GENERAL PROTECTION FAULT (#GP) !!!\n  Error Code: {:#x}\n  Stack Frame:\n{:#?}", 
             error_code, stack_frame

@@ -1,5 +1,3 @@
-// src/process/usermode.rs
-
 use core::arch::global_asm;
 
 /// Helper to fetch the Ring 3 CS and SS selectors from the GDT.
@@ -12,7 +10,7 @@ pub extern "C" fn get_user_selectors_helper() -> u64 {
     (cs << 32) | ss
 }
 
-// Declare the global_asm symbol so naked_asm! can reference it
+// Declare the assembly entry point for naked_asm!.
 extern "C" {
     fn enter_usermode();
 }

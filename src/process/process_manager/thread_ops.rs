@@ -1,12 +1,10 @@
-// src/process/process_manager/thread_ops.rs
-
 use alloc::boxed::Box;
 use x86_64::registers::control::Cr3;
 use x86_64::VirtAddr;
 use alloc::collections::VecDeque;
 use crate::process::thread::{TID, Thread, ThreadState};
 use crate::process::PID;
-use crate::memory::memory_manager::MEMORY_MANAGER;
+use crate::memory::memory_manager::{MEMORY_MANAGER, Oom};
 use super::manager::ProcessManager;
 
 impl ProcessManager {
@@ -20,7 +18,6 @@ impl ProcessManager {
             tid
         };
 
-        // MILESTONE 4.1: Automatically allocate a user stack if this is a user process
         let proc = self.process_mut(pid);
         if let Some(space) = proc.address_space.as_mut() {
             let mut mm_guard = MEMORY_MANAGER.lock();
@@ -37,26 +34,26 @@ impl ProcessManager {
         tid
     }
 
-    pub fn create_user_thread_locked(&mut self, pid: PID, entry_point: VirtAddr) -> TID {
+    pub fn create_user_thread_locked(&mut self, pid: PID, entry_point: VirtAddr) -> Result<TID, Oom> {
+        // Allocate the user stack before taking a TID, so a failure does not
+        // leak a recycled TID slot.
+        let user_stack = {
+            let space = self
+                .process_mut(pid)
+                .address_space
+                .as_mut()
+                .expect("create_user_thread_locked: process has no address space");
+            let mut mm_guard = MEMORY_MANAGER.lock();
+            let mm = mm_guard.as_mut().ok_or(Oom)?;
+            mm.allocate_user_stack(space)?
+        };
+
         let tid = if let Some(free_tid) = self.free_tids.pop() {
             free_tid
         } else {
             TID(self.threads.len() as u64)
         };
 
-        let proc = self.process_mut(pid);
-        let user_stack_top = if let Some(space) = proc.address_space.as_mut() {
-            let mut mm_guard = MEMORY_MANAGER.lock();
-            if let Some(mm) = mm_guard.as_mut() {
-                mm.allocate_user_stack(space).ok()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let user_stack = user_stack_top.expect("Failed to allocate user stack for user thread");
         let thread = Box::new(Thread::new_user(tid, pid, 4096 * 4, entry_point, user_stack));
 
         if (tid.0 as usize) < self.threads.len() {
@@ -66,7 +63,7 @@ impl ProcessManager {
         }
 
         self.process_mut(pid).threads.push(tid);
-        tid
+        Ok(tid)
     }
 
     pub fn create_idle_thread_locked(&mut self, entry: extern "C" fn() -> !) -> TID {
@@ -117,13 +114,11 @@ impl ProcessManager {
                 deferred.push_back(tid);
                 continue;
             }
-            // Guard against a racing destroy_process()/remove_thread().
+            // The thread may already have been removed by another path.
             if !self.thread_exists(tid) {
                 continue;
             }
             let owner = self.thread(tid).get_owner();
-            // Drops Box<Thread> -> Thread::drop deallocates the 16 KB stack,
-            // and pushes the TID back onto free_tids.
             self.remove_thread_locked(tid);
             self.finalize_process_if_empty(owner);
         }
@@ -145,7 +140,7 @@ impl ProcessManager {
         if !should_finalize {
             return;
         }
-        // Defensive: release a leftover address space if one somehow remains.
+        // Release any address space left behind during thread teardown.
         if let Some(mut space) = self.process_mut(pid).address_space.take() {
             let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();
             if let Some(mm) = mm_guard.as_mut() {
@@ -172,7 +167,6 @@ impl ProcessManager {
         self.free_tids.push(tid);
     }
 
-    // --- state transitions ---
 
     pub fn block_thread(&mut self, tid: TID) {
         self.thread_mut(tid).set_to_blocked();
@@ -208,12 +202,11 @@ impl ProcessManager {
     }
 
     pub fn kill_current_thread(&mut self, tid: TID) {
-        self.exit_thread(tid); // Running -> Exited
-        self.set_zombie(tid);  // Exited  -> Zombie
+        self.exit_thread(tid);
+        self.set_zombie(tid);
         
         let owner = self.thread(tid).get_owner();
         
-        // Check if any OTHER thread in this process is still alive
         let has_living_threads = self.process(owner).threads.iter().any(|&t| {
             let state = self.thread(t).get_state();
             t != tid && state != ThreadState::Exited && state != ThreadState::Zombie

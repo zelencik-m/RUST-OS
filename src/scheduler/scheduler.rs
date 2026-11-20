@@ -1,14 +1,12 @@
-// src/scheduler/scheduler.rs
-
-use alloc::collections::VecDeque;
+use alloc::collections::{BinaryHeap, VecDeque};
+use core::cmp::Reverse;
 use crate::debugln;
 use crate::process::thread::TID;
 use lazy_static::lazy_static;
-use spin::Mutex;
 use crate::process::process_manager::{switch_to, PROCESS_MANAGER};
 use crate::process::thread::ThreadState;
+use crate::sync::IrqSafeMutex;
 use x86_64::instructions::interrupts;
-use crate::sync::{IrqSafeMutex};
 
 const TIME_SLICE: u64 = 2; // Number of ticks before a thread is preempted
 
@@ -16,20 +14,21 @@ lazy_static! {
     pub static ref SCHEDULER: IrqSafeMutex<Scheduler> = IrqSafeMutex::new(Scheduler::new());
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SleepThread{
-    tid:TID,
-    wakeup_tick:u64,
+/// A sleeping thread, ordered by wake-up tick (then TID, for a total order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SleepEntry {
+    wakeup_tick: u64,
+    tid: u64,
 }
 
 pub struct Scheduler {
-    pub current: Option<TID>,
-    pub runnables: VecDeque<TID>,
-    pub tick_count: u64,
-    pub sleep_queue: VecDeque<SleepThread>,
-    pub idle_thread: Option<TID>,
-    // Optionally: the kernel context could stay in ProcessManager,
-    // but if you prefer you can move it here as well.
+    current: Option<TID>,
+    runnables: VecDeque<TID>,
+    tick_count: u64,
+    /// Min-heap on `wakeup_tick`: the earliest wake-up is always on top, so
+    /// `schedule()` only looks at threads that are actually due.
+    sleep_queue: BinaryHeap<Reverse<SleepEntry>>,
+    idle_thread: Option<TID>,
 }
 
 impl Scheduler {
@@ -38,7 +37,7 @@ impl Scheduler {
             current: None,
             runnables: VecDeque::new(),
             tick_count: 0,
-            sleep_queue: VecDeque::new(),
+            sleep_queue: BinaryHeap::new(),
             idle_thread: None,
         }
     }
@@ -48,8 +47,6 @@ impl Scheduler {
     }
 
     pub fn next_runnable(&mut self) -> Option<TID> {
-        // Optionally filter out TIDs that are no longer valid.
-        // For now, just pop front.
         self.runnables.pop_front()
     }
 
@@ -65,40 +62,58 @@ impl Scheduler {
         self.idle_thread = Some(tid);
     }
 
-    // You may also want a method to remove a specific TID from runnables
-    // if a thread is destroyed while still in the queue.
-    pub fn remove_from_runnables(&mut self, tid: TID) {
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+
+    pub fn is_runnable(&self, tid: TID) -> bool {
+        self.runnables.contains(&tid)
+    }
+
+    /// Drop every queued runnable thread. Used by test kernels that replace
+    /// the boot-time threads with their own.
+    pub fn clear_runnables(&mut self) {
+        self.runnables.clear();
+    }
+
+    /// Remove `tid` from the run queue and the sleep queue.
+    ///
+    /// Call this whenever a thread is destroyed. Otherwise a stale sleep
+    /// entry could wake an unrelated thread that later reuses the same TID.
+    pub fn remove_from_queues(&mut self, tid: TID) {
         self.runnables.retain(|&x| x != tid);
+        self.sleep_queue.retain(|Reverse(entry)| entry.tid != tid.0);
     }
 
     fn requeue_and_pick_next(&mut self) -> Option<TID> {
+        let mut pm = PROCESS_MANAGER.lock();
+
         if let Some(cur) = self.current {
-            let pm = PROCESS_MANAGER.lock();
             let state = pm.get_thread_state(cur);
-            drop(pm);
-            if Some(cur) != self.idle_thread && matches!(state, ThreadState::Running | ThreadState::Ready) {
+            if Some(cur) != self.idle_thread
+                && matches!(state, ThreadState::Running | ThreadState::Ready)
+            {
                 self.runnables.push_back(cur);
             }
         }
 
-        let mut remaining = self.sleep_queue.len();
-        while remaining > 0 {
-            if let Some(sleep_thread) = self.sleep_queue.pop_front() {
-                remaining -= 1;
-                let mut pm = PROCESS_MANAGER.lock();
-                if self.tick_count >= sleep_thread.wakeup_tick
-                    && pm.get_thread_state(sleep_thread.tid) == ThreadState::Sleeping
-                {
-                    // Wake the thread: set state to Ready and add to run queue
-                    pm.wake_thread(sleep_thread.tid);
-                    drop(pm);
-                    self.add_runnable(sleep_thread.tid);
-                } else {
-                    self.sleep_queue.push_back(sleep_thread);
-                }
+        // Wake every thread whose deadline has passed. The heap is ordered by
+        // deadline, so stop at the first entry that is still in the future.
+        while let Some(&Reverse(entry)) = self.sleep_queue.peek() {
+            if entry.wakeup_tick > self.tick_count {
+                break;
+            }
+            self.sleep_queue.pop();
+
+            let tid = TID(entry.tid);
+            // A thread that is no longer Sleeping (e.g. it was killed) just
+            // has its stale entry dropped.
+            if pm.get_thread_state(tid) == ThreadState::Sleeping {
+                pm.wake_thread(tid);
+                self.runnables.push_back(tid);
             }
         }
-
+        drop(pm);
 
         if self.runnables.is_empty() {
             debugln!("No runnable threads, switching to idle thread");
@@ -107,20 +122,30 @@ impl Scheduler {
         self.next_runnable()
     }
 
+    /// Advance the tick counter. Returns `true` when the current time slice
+    /// has expired and the caller should reschedule.
     pub fn tick(&mut self) -> bool {
-        debugln!("Tick: {}", self.tick_count);
         self.tick_count = self.tick_count.wrapping_add(1);
-        if self.tick_count % TIME_SLICE == 0 {
-            true // signal: time to reschedule
-        } else {
-            false
-        }
+        self.tick_count % TIME_SLICE == 0
     }
-
 }
 
-
+/// Pick the next thread and switch to it.
+///
+/// Runs with interrupts disabled from start to finish. `switch_to` marks the
+/// new thread as current before `switch_context` moves onto its stack. A
+/// timer interrupt in that gap would run the scheduler on the old thread's
+/// stack while `current` names the new thread, and `switch_context` would save
+/// the old stack pointer into the new thread's context. Each thread resumes
+/// with its own interrupt flag because `switch_context` saves and restores
+/// RFLAGS, and `without_interrupts` re-enables interrupts here if the caller
+/// had them on.
 pub fn schedule() {
+    interrupts::without_interrupts(schedule_with_interrupts_disabled);
+}
+
+fn schedule_with_interrupts_disabled() {
+    debug_assert!(!interrupts::are_enabled());
     let mut scheduler = SCHEDULER.lock();
     let next = scheduler.requeue_and_pick_next();
     if let Some(tid) = next {
@@ -135,16 +160,26 @@ pub fn yield_now() {
     schedule();
 }
 
+/// Put the current thread to sleep for `ticks` timer ticks.
+///
+/// Queuing the thread and switching away happen with interrupts disabled, so
+/// no interrupt can run the scheduler while the thread is marked Sleeping but
+/// still running.
 pub fn sleep(ticks: u64) {
-    let mut scheduler = SCHEDULER.lock();
-    if let Some(current_tid) = scheduler.get_current() {
-        debugln!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
-        let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
-        scheduler.sleep_queue.push_back(SleepThread { tid: current_tid, wakeup_tick });
-        PROCESS_MANAGER.lock().sleep_thread(current_tid);
-        drop(scheduler);
-    } else {
-        panic!("No current thread to sleep");
-    }
-    schedule();
+    interrupts::without_interrupts(|| {
+        {
+            let mut scheduler = SCHEDULER.lock();
+            let current_tid = scheduler
+                .get_current()
+                .expect("No current thread to sleep");
+            debugln!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
+            let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
+            scheduler.sleep_queue.push(Reverse(SleepEntry {
+                wakeup_tick,
+                tid: current_tid.0,
+            }));
+            PROCESS_MANAGER.lock().sleep_thread(current_tid);
+        }
+        schedule_with_interrupts_disabled();
+    });
 }

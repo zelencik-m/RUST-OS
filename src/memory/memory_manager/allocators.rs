@@ -1,11 +1,15 @@
-// src/memory/memory_manager/allocators.rs
-
 use super::MemoryManager;
 use super::vmm::Oom;
 use crate::memory::address_space::AddressSpace;
 use crate::memory::vma::VmaKind;
 use crate::memory::VmArea;
 use x86_64::{structures::paging::PageTableFlags, VirtAddr};
+
+/// Flags for user stack and heap pages: writable data, never executable (W^X).
+const USER_DATA_FLAGS: PageTableFlags = PageTableFlags::PRESENT
+    .union(PageTableFlags::WRITABLE)
+    .union(PageTableFlags::USER_ACCESSIBLE)
+    .union(PageTableFlags::NO_EXECUTE);
 
 impl MemoryManager {
     pub fn allocate_user_stack(&mut self, space: &mut AddressSpace) -> Result<VirtAddr, Oom> {
@@ -16,7 +20,7 @@ impl MemoryManager {
 
         let start = space.find_free_region_top_down(total_size as u64).ok_or(Oom)?;
 
-        // 1. Register Guard Page (Bottom-most page)
+        // Reserve the bottom page as a guard.
         space.vmas.push(VmArea {
             start,
             size: 4096,
@@ -24,17 +28,16 @@ impl MemoryManager {
             kind: VmaKind::Guard,
         });
 
-        // 2. Map Stack Pages
         let stack_start = start + 4096u64;
         let stack_size = STACK_PAGES * 4096;
         
         self.mmap_at(
             space, stack_start, stack_size, 
-            PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE, 
+            USER_DATA_FLAGS, 
             VmaKind::Stack
         )?;
 
-        // 3. Return initial RSP (Top of the stack)
+        // The initial stack pointer is at the top of the stack.
         Ok(stack_start + stack_size as u64)
     }
 
@@ -54,7 +57,7 @@ impl MemoryManager {
                 let size = (map_end.as_u64() - map_start.as_u64()) as usize;
                 self.mmap_at(
                     space, map_start, size,
-                    PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::USER_ACCESSIBLE,
+                    USER_DATA_FLAGS,
                     VmaKind::Heap,
                 )?;
             }

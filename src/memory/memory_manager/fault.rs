@@ -1,5 +1,3 @@
-// src/memory/memory_manager/fault.rs
-
 use super::MemoryManager;
 use super::vmm::Oom;
 use crate::memory::address_space::AddressSpace;
@@ -11,7 +9,7 @@ use x86_64::VirtAddr;
 
 /// Result of handling a page fault.
 ///
-/// This is the single classification used by the kernel's page-fault path.
+/// Classification returned to the kernel's page-fault path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultAction {
     /// The fault was resolved by demand-mapping a page.
@@ -30,9 +28,7 @@ pub enum FaultAction {
 impl MemoryManager {
     /// Handle a page fault for a given address space.
     ///
-    /// This is the single authoritative page-fault handler for user address
-    /// spaces. It performs VMA lookup, guard-page detection, and demand
-    /// mapping in one place.
+    /// Checks the VMA, detects guard pages, and demand-maps valid faults.
     pub fn handle_page_fault(
         &mut self,
         space: &mut AddressSpace,

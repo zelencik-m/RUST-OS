@@ -1,18 +1,14 @@
-// src/memory/memory_manager/mod.rs
-
 use bootloader::bootinfo::MemoryMap;
 use x86_64::structures::paging::{OffsetPageTable, Size4KiB, PhysFrame, mapper::MapToError};
 use x86_64::VirtAddr;
 use crate::sync::IrqSafeMutex;
 use crate::memory::BootInfoFrameAllocator;
 
-// Import submodules so their `impl` blocks are compiled
 mod lifecycle;
 mod vmm;
 mod fault;
 mod allocators;
 
-// Re-export public types/enums so `use crate::memory::memory_manager::Oom` still works
 pub use vmm::Oom;
 pub use fault::FaultAction;
 

@@ -1,5 +1,3 @@
-// src/memory/frame_allocator.rs
-
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 use x86_64::{
     structures::paging::{FrameAllocator, PhysFrame, Size4KiB},
@@ -164,10 +162,8 @@ impl BootInfoFrameAllocator {
             }
         }
 
-        // If any frames were freed before tracking was enabled, validate them.
-        //
-        // With the bootstrap `free_frame` panic below, this list should normally
-        // be empty. The validation is still useful if this code is extended.
+        // Validate any frames freed before tracking was enabled. This should
+        // be empty because `free_frame` panics during bootstrap.
         let mut preserved_freed = Vec::new();
 
         for frame in self.freed.drain(..) {

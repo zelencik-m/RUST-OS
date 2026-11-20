@@ -38,8 +38,6 @@ pub struct ProcessIdentity {
     children: Vec<PID>,
 }
 
-struct ProcessContext {}
-
 const MAX_FDS: usize = 256;
 
 pub struct Process {
@@ -70,6 +68,22 @@ impl Process {
             fd_table: Vec::new(),
             cwd: Path::root(),
         }
+    }
+
+    pub fn pid(&self) -> PID {
+        self.identity.pid
+    }
+
+    pub fn name(&self) -> &str {
+        &self.identity.name
+    }
+
+    pub fn process_type(&self) -> &ProcessType {
+        &self.identity.process_type
+    }
+
+    pub fn parent(&self) -> Option<PID> {
+        self.identity.parent
     }
 
     pub fn add_child(&mut self, child_pid: PID) {

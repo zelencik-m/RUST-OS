@@ -1,5 +1,3 @@
-// src/task/mod.rs
-
 use core::{future::Future, pin::Pin};
 use alloc::boxed::Box;
 
@@ -20,7 +18,7 @@ impl TaskId {
 }
 
 pub struct Task {
-    id: TaskId, // new
+    id: TaskId,
     future: Pin<Box<dyn Future<Output = ()>>>,
 }
 

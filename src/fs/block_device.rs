@@ -1,5 +1,3 @@
-// src/fs/block_device.rs
-
 use alloc::vec::Vec;
 
 use super::error::FsError;
@@ -9,8 +7,7 @@ pub const SECTOR_SIZE: usize = 512;
 
 /// Minimal block-device API used by filesystems.
 ///
-/// The filesystem never talks directly to ATA ports. It asks for sectors,
-/// while the default `read_at` helper handles unaligned byte ranges.
+/// Filesystems request sectors; the byte helpers handle unaligned ranges.
 pub trait BlockDevice: Send + Sync {
     fn read_sectors(
         &self,

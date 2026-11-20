@@ -1,5 +1,3 @@
-// src/memory/translate.rs
-
 use x86_64::{PhysAddr, VirtAddr};
 
 /// Translates the given virtual address to the mapped physical address,
@@ -16,11 +14,7 @@ pub unsafe fn translate_addr(
     translate_addr_inner(addr, physical_memory_offset)
 }
 
-/// Private helper that performs the actual page-table walk.
-///
-/// Keeping this as a safe function limits the scope of `unsafe` — Rust
-/// treats the entire body of an `unsafe fn` as an unsafe block, so we
-/// confine the raw-pointer dereference to the smallest possible scope.
+/// Walks the page tables; keeping this safe confines `unsafe` to the pointer read.
 fn translate_addr_inner(
     addr: VirtAddr,
     physical_memory_offset: VirtAddr,

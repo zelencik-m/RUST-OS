@@ -1,5 +1,3 @@
-// src/fs/ext2/mod.rs
-
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -13,8 +11,6 @@ use super::filesystem::FileSystem;
 use super::inode::{DirEntry, FileStat, FileType, Inode, InodeRef};
 
 mod ondisk;
-
-use crate::serial_println;
 
 use ondisk::{
     align4, put_le16, put_le32, Ext2DirEntryHeader, Ext2DiskInode, Ext2GroupDesc,
@@ -80,7 +76,7 @@ impl Ext2Fs {
             return Err(FsError::Io);
         }
 
-        crate::serial_println!(
+        crate::debugln!(
             "[ext2] mounted: block_size={}, blocks={}, inodes={}, groups={}",
             state.block_size(),
             state.superblock.blocks_count,
@@ -1019,7 +1015,6 @@ impl Ext2State {
     }
 }
 
-// Keep a couple of on-disk constants close to the filesystem implementation.
 #[allow(dead_code)]
 const _EXT2_MAGIC: u16 = EXT2_SUPER_MAGIC;
 #[allow(dead_code)]

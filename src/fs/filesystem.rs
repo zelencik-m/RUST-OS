@@ -1,4 +1,3 @@
-// src/fs/filesystem.rs
 use super::inode::InodeRef;
 
 /// A mounted filesystem implementation.
