@@ -64,6 +64,10 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
         SYS_GETPID => pid.0,
         SYS_GETTID => tid.0,
         SYS_MKDIR => ret(sys_mkdir(pid, args[0], args[1])),
+        SYS_RMDIR => ret(sys_rmdir(pid, args[0])),
+        SYS_UNLINK => ret(sys_unlink(pid, args[0])),
+        SYS_GETCWD => ret(sys_getcwd(pid, args[0], args[1])),
+        SYS_CHDIR => ret(sys_chdir(pid, args[0])),
         SYS_GETDENTS64 => ret(sys_getdents64(pid, args[0], args[1], args[2])),
         _ => {
             crate::debugln!("syscall: unknown syscall number {}", frame.rax);
@@ -247,6 +251,64 @@ fn sys_mkdir(
     with_vfs(|vfs| vfs.mkdir(&cwd, &path))
         .map_err(SysError::from_fs_error)?;
 
+    Ok(0)
+}
+
+fn sys_rmdir(pid: PID, user_path: u64) -> Result<u64, SysError> {
+    let path = copy_c_string_from_user(pid, user_path, PATH_MAX)?;
+    let cwd = process_cwd(pid);
+
+    with_vfs(|vfs| vfs.rmdir(&cwd, &path)).map_err(SysError::from_fs_error)?;
+    Ok(0)
+}
+
+fn sys_unlink(pid: PID, user_path: u64) -> Result<u64, SysError> {
+    let path = copy_c_string_from_user(pid, user_path, PATH_MAX)?;
+    let cwd = process_cwd(pid);
+
+    with_vfs(|vfs| vfs.unlink(&cwd, &path)).map_err(SysError::from_fs_error)?;
+    Ok(0)
+}
+
+/// Linux `getcwd(buf, size)`: copy the cwd plus a NUL into `buf` and return
+/// the number of bytes written (including the NUL). A buffer too small for
+/// the whole path gives `ERANGE`. This check comes before the pointer check,
+/// as in Linux, so `getcwd(NULL, 0)` is `ERANGE` and not `EFAULT`.
+fn sys_getcwd(pid: PID, user_buf: u64, size: u64) -> Result<u64, SysError> {
+    let size = usize_from_u64(size)?;
+    let cwd = process_cwd(pid);
+
+    let mut bytes = Vec::with_capacity(cwd.as_str().len() + 1);
+    bytes.extend_from_slice(cwd.as_str().as_bytes());
+    bytes.push(0);
+    if bytes.len() > size {
+        return Err(SysError::Erange);
+    }
+
+    let destination = validate_user_range(user_buf, bytes.len())?;
+    copy_to_user(pid, destination, &bytes)?;
+    Ok(bytes.len() as u64)
+}
+
+/// Linux `chdir(path)`: make `path` (resolved against the current cwd) the
+/// process's working directory.
+///
+/// PROCESS_MANAGER is held only briefly, to read and then to set the cwd.
+/// The VFS lookup in between may do disk I/O, and PM is an IRQ-safe lock
+/// (interrupts are off while it is held). The cwd is set only after every
+/// check has passed, so a failed chdir leaves it unchanged.
+fn sys_chdir(pid: PID, user_path: u64) -> Result<u64, SysError> {
+    let raw = copy_c_string_from_user(pid, user_path, PATH_MAX)?;
+    let cwd = process_cwd(pid);
+    let path = Path::resolve(&cwd, &raw).map_err(SysError::from_fs_error)?;
+
+    let stat = with_vfs(|vfs| vfs.stat(&cwd, path.as_str()))
+        .map_err(SysError::from_fs_error)?;
+    if stat.file_type != FileType::Directory {
+        return Err(SysError::Enotdir);
+    }
+
+    PROCESS_MANAGER.lock().process_mut(pid).set_cwd(path);
     Ok(0)
 }
 

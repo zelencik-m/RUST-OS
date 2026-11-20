@@ -13,6 +13,9 @@ pub enum SysError {
     Eisdir,
     Eio,
     Emfile,
+    Ebusy,
+    Erange,
+    Enotempty,
 }
 
 impl SysError {
@@ -29,6 +32,9 @@ impl SysError {
             SysError::Eisdir => (-21i64) as u64,
             SysError::Eio => (-5i64) as u64,
             SysError::Emfile => (-24i64) as u64,
+            SysError::Ebusy => (-16i64) as u64,
+            SysError::Erange => (-34i64) as u64,
+            SysError::Enotempty => (-39i64) as u64,
         }
     }
 
@@ -42,7 +48,8 @@ impl SysError {
             FsError::ReadOnly => SysError::Ebadf,
             FsError::InvalidFlags => SysError::Einval,
             FsError::InvalidPath => SysError::Einval,
-            FsError::NotEmpty => SysError::Einval,
+            FsError::NotEmpty => SysError::Enotempty,
+            FsError::Busy => SysError::Ebusy,
             FsError::Io => SysError::Eio,
             FsError::NotInitialized => SysError::Eio,
             FsError::TooManyFiles => SysError::Emfile,

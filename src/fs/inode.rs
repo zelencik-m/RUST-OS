@@ -45,6 +45,28 @@ pub trait Inode: Send + Sync {
 
     fn len(&self) -> Result<u64, FsError>;
 
+    /// Remove the non-directory entry `name` from this directory.
+    ///
+    /// Contract shared by every filesystem:
+    /// - `self` is not a directory → `NotDirectory`
+    /// - `name` is empty, `.`, `..` or contains `/` → `InvalidPath`
+    /// - no such entry → `NotFound`
+    /// - the entry is a directory → `IsDirectory` (use `rmdir`)
+    ///
+    /// The default is for inodes that can never be directories (devices).
+    fn unlink(&self, _name: &str) -> Result<(), FsError> {
+        Err(FsError::NotDirectory)
+    }
+
+    /// Remove the empty directory `name` from this directory.
+    ///
+    /// Same contract as [`Inode::unlink`], except:
+    /// - the entry is not a directory → `NotDirectory`
+    /// - the directory has entries other than `.`/`..` → `NotEmpty`
+    fn rmdir(&self, _name: &str) -> Result<(), FsError> {
+        Err(FsError::NotDirectory)
+    }
+
     fn stat(&self) -> Result<FileStat, FsError> {
         Ok(FileStat {
             size: self.len()?,

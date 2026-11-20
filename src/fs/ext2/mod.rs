@@ -9,13 +9,14 @@ use super::block_device::BlockDevice;
 use super::error::FsError;
 use super::filesystem::FileSystem;
 use super::inode::{DirEntry, FileStat, FileType, Inode, InodeRef};
+use super::path::Path;
 
 mod ondisk;
 
 use ondisk::{
     align4, put_le16, put_le32, Ext2DirEntryHeader, Ext2DiskInode, Ext2GroupDesc,
-    Ext2Superblock, EXT2_DIND_BLOCK, EXT2_FT_DIR, EXT2_FT_REG_FILE, EXT2_NDIR_BLOCKS,
-    EXT2_ROOT_INO, EXT2_SUPER_MAGIC, EXT2_TIND_BLOCK,
+    Ext2Superblock, EXT2_DIND_BLOCK, EXT2_FT_DIR, EXT2_FT_REG_FILE, EXT2_IND_BLOCK,
+    EXT2_NDIR_BLOCKS, EXT2_N_BLOCKS, EXT2_ROOT_INO, EXT2_SUPER_MAGIC, EXT2_TIND_BLOCK,
 };
 
 pub use ondisk::{Ext2DiskInode as DiskInode, Ext2Superblock as Superblock};
@@ -24,6 +25,12 @@ const S_IFREG: u16 = 0x8000;
 const S_IFDIR: u16 = 0x4000;
 const DEFAULT_FILE_MODE: u16 = S_IFREG | 0o644;
 const DEFAULT_DIR_MODE: u16 = S_IFDIR | 0o755;
+
+/// Timestamp written to `dtime` when an inode is deleted (2023-11-14 UTC).
+/// There's no RTC yet, so this is a fixed value. It must look like a real
+/// time: e2fsck reads a `dtime` below `s_inodes_count` as an ext3 orphan-list
+/// "next inode" link and reports the filesystem as corrupt.
+const EXT2_FALLBACK_TIME: u32 = 1_700_000_000;
 
 struct Ext2State {
     device: Arc<dyn BlockDevice>,
@@ -99,6 +106,80 @@ impl Ext2Fs {
             groups,
             group_desc_offset,
         }
+    }
+}
+
+/// Allocation counters read straight from disk (not the mount-time
+/// superblock snapshot). Used by tests to check that operations which free
+/// space put every block and inode back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ext2Usage {
+    /// Superblock `s_free_blocks_count`.
+    pub free_blocks: u32,
+    /// Superblock `s_free_inodes_count`.
+    pub free_inodes: u32,
+    /// Sum of `bg_free_blocks_count` over all groups.
+    pub group_free_blocks: u32,
+    /// Sum of `bg_free_inodes_count` over all groups.
+    pub group_free_inodes: u32,
+    /// Sum of `bg_used_dirs_count` over all groups.
+    pub used_dirs: u32,
+}
+
+/// Read-only inspection helpers for tests and diagnostics.
+impl Ext2Fs {
+    pub fn usage(&self) -> Result<Ext2Usage, FsError> {
+        let state = &self.state;
+        let mut sb = vec![0u8; 1024];
+        state.device.read_at(1024, &mut sb)?;
+
+        let mut usage = Ext2Usage {
+            free_blocks: u32::from_le_bytes([sb[12], sb[13], sb[14], sb[15]]),
+            free_inodes: u32::from_le_bytes([sb[16], sb[17], sb[18], sb[19]]),
+            group_free_blocks: 0,
+            group_free_inodes: 0,
+            used_dirs: 0,
+        };
+
+        for group in 0..state.groups.len() as u64 {
+            let offset = group
+                .checked_mul(state.superblock.desc_size as u64)
+                .and_then(|rel| rel.checked_add(state.group_desc_offset))
+                .ok_or(FsError::Io)?;
+            let mut raw = [0u8; 32];
+            state.device.read_at(offset, &mut raw)?;
+            let desc = Ext2GroupDesc::parse(&raw)?;
+            usage.group_free_blocks += desc.free_blocks_count as u32;
+            usage.group_free_inodes += desc.free_inodes_count as u32;
+            usage.used_dirs += desc.used_dirs_count as u32;
+        }
+        Ok(usage)
+    }
+
+    /// Inode number of an absolute path. Unlike the VFS this returns the raw
+    /// number, so tests can inspect an inode after its name is gone.
+    pub fn resolve_ino(&self, path: &Path) -> Result<u32, FsError> {
+        let mut ino = EXT2_ROOT_INO;
+        for component in path.components() {
+            let dir = self.state.read_inode(ino)?;
+            ino = self
+                .state
+                .directory_entries(&dir)?
+                .into_iter()
+                .find(|entry| entry.name == component)
+                .map(|entry| entry.ino)
+                .ok_or(FsError::NotFound)?;
+        }
+        Ok(ino)
+    }
+
+    pub fn read_disk_inode(&self, ino: u32) -> Result<DiskInode, FsError> {
+        self.state.read_inode(ino)
+    }
+
+    /// Superblock `s_inodes_count`.
+    pub fn inodes_count(&self) -> u32 {
+        self.state.superblock.inodes_count
     }
 }
 
@@ -717,6 +798,155 @@ impl Ext2State {
         self.write_inode(parent_ino, &parent)
     }
 
+    /// Remove the record called `name` from directory `dir_ino` and return
+    /// the inode number it pointed at.
+    ///
+    /// The records in a directory block form a chain whose `rec_len`s add up
+    /// to exactly one block:
+    /// - A record with a predecessor in the same block is absorbed by it: the
+    ///   predecessor's `rec_len` grows over the removed bytes.
+    /// - The first record of a block has no predecessor, and the chain must
+    ///   start at offset 0. So it stays in place as an empty slot (`inode = 0`),
+    ///   which every reader skips.
+    ///
+    /// Like Linux, the removed record's `inode` is zeroed in both cases.
+    ///
+    /// The predecessor is tracked per block and includes empty slots, so
+    /// this walks the raw records. `directory_entries` won't do, because it
+    /// skips empty slots and flattens all blocks into one list.
+    fn remove_directory_entry(&self, dir_ino: u32, name: &str) -> Result<u32, FsError> {
+        let dir = self.read_inode(dir_ino)?;
+        if !dir.is_directory() {
+            return Err(FsError::NotDirectory);
+        }
+        let block_size = self.block_size();
+        let block_count = (dir.size as usize).div_ceil(block_size);
+
+        for logical in 0..block_count {
+            let physical = self.logical_to_physical_block(&dir, logical as u32)?;
+            if physical == 0 {
+                continue;
+            }
+            let mut data = self.read_block_vec(physical)?;
+            let valid = cmp::min(block_size, dir.size as usize - logical * block_size);
+            let mut previous: Option<usize> = None;
+            let mut off = 0usize;
+
+            while off < valid {
+                let header = Ext2DirEntryHeader::parse(&data[..valid], off)?;
+                let rec_len = header.rec_len as usize;
+                let name_len = header.name_len as usize;
+                if rec_len < 8
+                    || (rec_len & 3) != 0
+                    || off + rec_len > valid
+                    || name_len > rec_len - 8
+                {
+                    return Err(FsError::Io);
+                }
+
+                if header.inode != 0 && &data[off + 8..off + 8 + name_len] == name.as_bytes() {
+                    if let Some(prev) = previous {
+                        let prev_len = u16::from_le_bytes([data[prev + 4], data[prev + 5]]) as usize;
+                        let merged = u16::try_from(prev_len + rec_len).map_err(|_| FsError::Io)?;
+                        put_le16(&mut data, prev + 4, merged)?;
+                    }
+                    put_le32(&mut data, off, 0)?;
+                    self.write_block(physical, &data)?;
+                    return Ok(header.inode);
+                }
+
+                previous = Some(off);
+                off += rec_len;
+            }
+        }
+        Err(FsError::NotFound)
+    }
+
+    /// Find the child `name` of directory `dir_ino` for removal and return
+    /// its inode number and inode.
+    ///
+    /// `.` and `..` exist on disk as real records, but they must never be
+    /// removed by name, so they're refused here along with empty names and
+    /// names containing `/`.
+    fn child_for_removal(&self, dir_ino: u32, name: &str) -> Result<(u32, Ext2DiskInode), FsError> {
+        let dir = self.read_inode(dir_ino)?;
+        if !dir.is_directory() {
+            return Err(FsError::NotDirectory);
+        }
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+            return Err(FsError::InvalidPath);
+        }
+        let ino = self
+            .directory_entries(&dir)?
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| entry.ino)
+            .ok_or(FsError::NotFound)?;
+        Ok((ino, self.read_inode(ino)?))
+    }
+
+    /// Mark an inode deleted on disk (no links, `dtime` set) and give it back
+    /// to the inode allocator. Its blocks must already be freed.
+    fn release_inode(&self, ino: u32, inode: &mut Ext2DiskInode, was_dir: bool) -> Result<(), FsError> {
+        inode.links_count = 0;
+        inode.dtime = EXT2_FALLBACK_TIME;
+        self.write_inode(ino, inode)?;
+        // Also decrements `bg_used_dirs_count` when `was_dir`.
+        self.free_inode(ino, was_dir)
+    }
+
+    /// Remove the non-directory `name` from `parent_ino`.
+    ///
+    /// Write order is name, then data, then inode. A crash part-way through
+    /// leaks space, but it never leaves a name pointing at a freed inode.
+    fn unlink_child(&self, parent_ino: u32, name: &str) -> Result<(), FsError> {
+        let (ino, mut inode) = self.child_for_removal(parent_ino, name)?;
+        if inode.is_directory() {
+            return Err(FsError::IsDirectory);
+        }
+
+        self.remove_directory_entry(parent_ino, name)?;
+
+        inode.links_count = inode.links_count.saturating_sub(1);
+        if inode.links_count > 0 {
+            // Another hard link still names this inode.
+            return self.write_inode(ino, &inode);
+        }
+        // `inode` is the only in-memory copy and is written back once at
+        // the end, so nothing can write stale block pointers back over it.
+        self.free_all_blocks(&mut inode)?;
+        self.release_inode(ino, &mut inode, false)
+    }
+
+    /// Remove the empty directory `name` from `parent_ino`.
+    fn rmdir_child(&self, parent_ino: u32, name: &str) -> Result<(), FsError> {
+        let (ino, mut inode) = self.child_for_removal(parent_ino, name)?;
+        if !inode.is_directory() {
+            return Err(FsError::NotDirectory);
+        }
+        // Empty slots (`inode == 0`) are already skipped, so a directory whose
+        // files were all removed counts as empty however many blocks it has.
+        if self
+            .directory_entries(&inode)?
+            .iter()
+            .any(|entry| entry.name != "." && entry.name != "..")
+        {
+            return Err(FsError::NotEmpty);
+        }
+
+        self.remove_directory_entry(parent_ino, name)?;
+
+        // Both links go together: the parent's record (just removed) and the
+        // child's own `.` (freed with its blocks).
+        self.free_all_blocks(&mut inode)?;
+        self.release_inode(ino, &mut inode, true)?;
+
+        // The child's `..` record linked the parent.
+        let mut parent = self.read_inode(parent_ino)?;
+        parent.links_count = parent.links_count.saturating_sub(1);
+        self.write_inode(parent_ino, &parent)
+    }
+
     fn initialize_directory(&self, ino: u32, parent_ino: u32) -> Result<(), FsError> {
         let block = self.allocate_block()?;
         let mut inode = Ext2DiskInode::empty();
@@ -812,36 +1042,36 @@ impl Ext2State {
         Ok(())
     }
 
+    /// Free every block `inode` owns (direct blocks, plus the indirect trees
+    /// with their metadata blocks), then reset it in memory to an empty,
+    /// block-less inode. The caller writes it back. There's no type check, so
+    /// this works for files and directories alike.
+    fn free_all_blocks(&self, inode: &mut Ext2DiskInode) -> Result<(), FsError> {
+        // Fast symlinks keep their target inline in `block[]` and own no
+        // blocks (`blocks == 0`). Their "pointers" must not be freed.
+        if inode.blocks != 0 {
+            for &block in &inode.block[..EXT2_NDIR_BLOCKS] {
+                if block != 0 {
+                    self.free_block(block)?;
+                }
+            }
+            let mut freed = 0u32;
+            for (index, depth) in [(EXT2_IND_BLOCK, 1), (EXT2_DIND_BLOCK, 2), (EXT2_TIND_BLOCK, 3)] {
+                self.free_indirect_tree(inode.block[index], depth, &mut freed)?;
+            }
+        }
+        inode.block = [0; EXT2_N_BLOCKS];
+        inode.size = 0;
+        inode.blocks = 0;
+        Ok(())
+    }
+
     fn truncate_inode_to_zero(&self, ino: u32) -> Result<(), FsError> {
         let mut inode = self.read_inode(ino)?;
         if inode.is_directory() {
             return Err(FsError::IsDirectory);
         }
-
-        for idx in 0..EXT2_NDIR_BLOCKS {
-            if inode.block[idx] != 0 {
-                self.free_block(inode.block[idx])?;
-                inode.block[idx] = 0;
-            }
-        }
-        let mut freed_metadata_and_data = 0u32;
-        if inode.block[12] != 0 {
-            let block = inode.block[12];
-            self.free_indirect_tree(block, 1, &mut freed_metadata_and_data)?;
-            inode.block[12] = 0;
-        }
-        if inode.block[13] != 0 {
-            let block = inode.block[13];
-            self.free_indirect_tree(block, 2, &mut freed_metadata_and_data)?;
-            inode.block[13] = 0;
-        }
-        if inode.block[14] != 0 {
-            let block = inode.block[14];
-            self.free_indirect_tree(block, 3, &mut freed_metadata_and_data)?;
-            inode.block[14] = 0;
-        }
-        inode.size = 0;
-        inode.blocks = 0;
+        self.free_all_blocks(&mut inode)?;
         self.write_inode(ino, &inode)
     }
 }
@@ -986,6 +1216,19 @@ impl Inode for Ext2Inode {
         Ok(self.state.read_inode(self.ino)?.size)
     }
 
+    /// Known limitation: there's no orphan list. An `Ext2Inode` that is still
+    /// open (e.g. through an fd) keeps only the inode *number*. After unlink
+    /// it points at a freed inode whose blocks may be reused. POSIX would keep
+    /// the data alive until the last close; RamFs does, because its open
+    /// files hold an `Arc` to the data.
+    fn unlink(&self, name: &str) -> Result<(), FsError> {
+        self.state.unlink_child(self.ino, name)
+    }
+
+    fn rmdir(&self, name: &str) -> Result<(), FsError> {
+        self.state.rmdir_child(self.ino, name)
+    }
+
     fn stat(&self) -> Result<FileStat, FsError> {
         let inode = self.state.read_inode(self.ino)?;
         let file_type = if inode.is_directory() {
@@ -1017,7 +1260,3 @@ impl Ext2State {
 
 #[allow(dead_code)]
 const _EXT2_MAGIC: u16 = EXT2_SUPER_MAGIC;
-#[allow(dead_code)]
-const _EXT2_DIND_INDEX: usize = EXT2_DIND_BLOCK;
-#[allow(dead_code)]
-const _EXT2_TIND_INDEX: usize = EXT2_TIND_BLOCK;

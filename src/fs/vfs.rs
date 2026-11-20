@@ -78,6 +78,29 @@ impl Vfs {
         Ok(())
     }
 
+    /// Remove the file at `raw_path` (resolved against `cwd`).
+    pub fn unlink(&self, cwd: &Path, raw_path: &str) -> Result<(), FsError> {
+        let path = Path::resolve(cwd, raw_path)?;
+        // `/` has no parent/name split. Linux reports EISDIR for it.
+        if path.is_root() {
+            return Err(FsError::IsDirectory);
+        }
+        let (parent, name) = self.resolve_parent(&path)?;
+        parent.unlink(name)
+    }
+
+    /// Remove the empty directory at `raw_path` (resolved against `cwd`).
+    pub fn rmdir(&self, cwd: &Path, raw_path: &str) -> Result<(), FsError> {
+        let path = Path::resolve(cwd, raw_path)?;
+        // Covers paths that only normalize to `/`, like `/dir/..`. Linux
+        // reports EBUSY.
+        if path.is_root() {
+            return Err(FsError::Busy);
+        }
+        let (parent, name) = self.resolve_parent(&path)?;
+        parent.rmdir(name)
+    }
+
     pub fn stat(&self, cwd: &Path, raw_path: &str) -> Result<FileStat, FsError> {
         let path = Path::resolve(cwd, raw_path)?;
         self.resolve_inode(&path)?.stat()

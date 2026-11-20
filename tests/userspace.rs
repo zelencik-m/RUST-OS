@@ -50,6 +50,7 @@ elf!(VFS_TEST, "vfs_test");
 elf!(FS_TREE, "fs_tree_test");
 elf!(RING3_EXCEPTION, "ring3_exception_test");
 elf!(NX_EXEC, "nx_exec_test");
+elf!(FS_OPS, "fs_ops_test");
 
 #[derive(Clone)]
 struct UserCase {
@@ -58,10 +59,15 @@ struct UserCase {
     stdout: InodeRef,
     stderr: InodeRef,
     success_marker: &'static str,
+    /// Keep this case off the run queue until the named case has finished.
+    /// Use it for programs that would race another one on the shared RamFs.
+    start_after: Option<&'static str>,
 }
 
 struct RunnerState {
     cases: Vec<UserCase>,
+    /// `(tid, dependency)` for deferred cases that have not been started yet.
+    deferred: Vec<(TID, &'static str)>,
 }
 
 static RUNNER: IrqSafeMutex<Option<RunnerState>> = IrqSafeMutex::new(None);
@@ -120,6 +126,7 @@ extern "C" fn user_monitor() -> ! {
         }
 
         let mut finished = true;
+        let mut done: Vec<&'static str> = Vec::new();
         for case in &cases {
             // Capture output and completion together: a preemption between
             // these checks could otherwise hide a final failure message.
@@ -153,10 +160,25 @@ extern "C" fn user_monitor() -> ! {
                 );
                 panic!("user ELF reported failure");
             }
-            if !marker_seen || !no_longer_scheduled {
+            if marker_seen && no_longer_scheduled {
+                done.push(case.name);
+            } else {
                 finished = false;
             }
         }
+
+        interrupts::without_interrupts(|| {
+            let mut state = RUNNER.lock();
+            let state = state.as_mut().expect("userspace monitor state missing");
+            state.deferred.retain(|&(tid, after)| {
+                if done.contains(&after) {
+                    SCHEDULER.lock().add_runnable(tid);
+                    false
+                } else {
+                    true
+                }
+            });
+        });
 
         if finished {
             for case in &cases {
@@ -195,6 +217,7 @@ fn add_case(name: &'static str, image: &[u8], marker: &'static str, root: &Inode
         stdout,
         stderr,
         success_marker: marker,
+        start_after: None,
     }
 }
 
@@ -235,6 +258,11 @@ fn run_user_elf_smoke_programs() {
         "fs_tree_test: passed",
         &root,
     ));
+    // fs_tree_test walks the whole tree from `/`. If fs_ops_test removed a
+    // directory mid-walk, fs_tree_test would fail with "[cannot open ...]".
+    let mut fs_ops = add_case("fs_ops_test", &FS_OPS.0, "fs_ops_test: passed", &root);
+    fs_ops.start_after = Some("fs_tree_test");
+    cases.push(fs_ops);
     cases.push(add_case(
         "ring3_exception_test",
         &RING3_EXCEPTION.0,
@@ -255,12 +283,16 @@ fn run_user_elf_smoke_programs() {
     let monitor_tid = process_manager::create_thread(PID(0), user_monitor);
     *RUNNER.lock() = Some(RunnerState {
         cases: cases.clone(),
+        deferred: cases
+            .iter()
+            .filter_map(|case| case.start_after.map(|after| (case.tid, after)))
+            .collect(),
     });
     {
         let mut scheduler = SCHEDULER.lock();
         scheduler.clear_runnables();
         scheduler.add_runnable(monitor_tid);
-        for case in &cases {
+        for case in cases.iter().filter(|case| case.start_after.is_none()) {
             scheduler.add_runnable(case.tid);
         }
     }

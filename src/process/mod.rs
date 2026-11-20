@@ -149,4 +149,10 @@ impl Process {
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }
+
+    /// Replace the working directory. Callers must pass a canonical absolute
+    /// path that they have already checked is a directory.
+    pub fn set_cwd(&mut self, cwd: Path) {
+        self.cwd = cwd;
+    }
 }

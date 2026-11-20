@@ -46,6 +46,15 @@ impl RamInode {
     }
 }
 
+/// Names that may be removed from a directory: not empty, `.`, `..`, and
+/// without `/`.
+fn validate_entry_name(name: &str) -> Result<(), FsError> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return Err(FsError::InvalidPath);
+    }
+    Ok(())
+}
+
 impl RamFs {
     pub fn new() -> Self {
         Self {
@@ -170,6 +179,46 @@ impl Inode for RamInode {
             RamNode::File(data) => Ok(data.len() as u64),
             RamNode::Directory(children) => Ok(children.len() as u64),
         }
+    }
+
+    fn unlink(&self, name: &str) -> Result<(), FsError> {
+        let mut node = self.node.lock();
+        let RamNode::Directory(children) = &mut *node else {
+            return Err(FsError::NotDirectory);
+        };
+        validate_entry_name(name)?;
+
+        let child = children.get(name).ok_or(FsError::NotFound)?;
+        if child.file_type == FileType::Directory {
+            return Err(FsError::IsDirectory);
+        }
+
+        // Only the name goes away. Open `File`s hold their own `Arc`, so the
+        // data lives on until the last one is closed (POSIX unlink semantics).
+        children.remove(name);
+        Ok(())
+    }
+
+    fn rmdir(&self, name: &str) -> Result<(), FsError> {
+        let mut node = self.node.lock();
+        let RamNode::Directory(children) = &mut *node else {
+            return Err(FsError::NotDirectory);
+        };
+        validate_entry_name(name)?;
+
+        let child = children.get(name).ok_or(FsError::NotFound)?;
+        // Nested lock, always parent → child. Nothing locks a child before
+        // its parent, so this can't deadlock.
+        let is_empty = match &*child.node.lock() {
+            RamNode::Directory(grandchildren) => grandchildren.is_empty(),
+            RamNode::File(_) => return Err(FsError::NotDirectory),
+        };
+        if !is_empty {
+            return Err(FsError::NotEmpty);
+        }
+
+        children.remove(name);
+        Ok(())
     }
 
     fn stat(&self) -> Result<FileStat, FsError> {

@@ -11,6 +11,8 @@ pub enum FsError {
     InvalidFlags,
     InvalidPath,
     NotEmpty,
+    /// The target is in use and cannot be removed (e.g. `rmdir("/")`).
+    Busy,
     Io,
     NotInitialized,
     TooManyFiles,

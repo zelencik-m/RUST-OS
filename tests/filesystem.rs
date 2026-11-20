@@ -205,4 +205,110 @@ fn vfs_reports_expected_errors_and_open_flag_validation() {
         Some(FsError::NotFound)
     );
 }
+
+#[test_case]
+fn ramfs_unlink_and_rmdir_remove_entries() {
+    let root = RamFs::new().root();
+    root.create_child("file", FileType::Regular).unwrap();
+    root.create_child("dir", FileType::Directory).unwrap();
+
+    root.unlink("file").unwrap();
+    assert_eq!(root.lookup("file").err(), Some(FsError::NotFound));
+    root.rmdir("dir").unwrap();
+    assert_eq!(root.lookup("dir").err(), Some(FsError::NotFound));
+    assert!(root.readdir().unwrap().is_empty());
+
+    // A removed name can be reused, and the new object starts empty.
+    let again = root.create_child("file", FileType::Regular).unwrap();
+    assert_eq!(again.len().unwrap(), 0);
+}
+
+#[test_case]
+fn ramfs_unlink_and_rmdir_enforce_names_and_types() {
+    let root = RamFs::new().root();
+    let file = root.create_child("file", FileType::Regular).unwrap();
+    let dir = root.create_child("dir", FileType::Directory).unwrap();
+    dir.create_child("inner", FileType::Regular).unwrap();
+
+    for bad in ["", ".", "..", "a/b"] {
+        assert_eq!(root.unlink(bad), Err(FsError::InvalidPath), "unlink {:?}", bad);
+        assert_eq!(root.rmdir(bad), Err(FsError::InvalidPath), "rmdir {:?}", bad);
+    }
+    assert_eq!(root.unlink("missing"), Err(FsError::NotFound));
+    assert_eq!(root.rmdir("missing"), Err(FsError::NotFound));
+    assert_eq!(root.unlink("dir"), Err(FsError::IsDirectory));
+    assert_eq!(root.rmdir("file"), Err(FsError::NotDirectory));
+    assert_eq!(root.rmdir("dir"), Err(FsError::NotEmpty));
+    // unlink/rmdir *on* a non-directory.
+    assert_eq!(file.unlink("x"), Err(FsError::NotDirectory));
+    assert_eq!(file.rmdir("x"), Err(FsError::NotDirectory));
+
+    // Failed calls must not have removed anything.
+    assert_eq!(root.readdir().unwrap().len(), 2);
+    assert_eq!(dir.readdir().unwrap().len(), 1);
+}
+
+#[test_case]
+fn vfs_unlink_and_rmdir_resolve_paths() {
+    let vfs = ram_vfs();
+    let root = Path::root();
+    vfs.mkdir(&root, "/a").unwrap();
+    vfs.mkdir(&root, "/a/b").unwrap();
+    let create = OpenFlags::from_raw(file::O_CREAT | file::O_WRONLY).unwrap();
+    vfs.open(&root, "/a/f", create).unwrap();
+
+    // Relative to a cwd, with `..` and `.` normalized away.
+    let cwd = Path::new_absolute("/a/b").unwrap();
+    vfs.unlink(&cwd, "../f").unwrap();
+    assert_eq!(vfs.stat(&root, "/a/f").err(), Some(FsError::NotFound));
+    vfs.rmdir(&cwd, "../b/.").unwrap();
+    assert_eq!(vfs.stat(&root, "/a/b").err(), Some(FsError::NotFound));
+    vfs.rmdir(&root, "a").unwrap();
+    assert!(vfs.readdir(&root, "/").unwrap().is_empty());
+}
+
+#[test_case]
+fn vfs_unlink_and_rmdir_report_errors() {
+    let vfs = ram_vfs();
+    let root = Path::root();
+    vfs.mkdir(&root, "/dir").unwrap();
+    let create = OpenFlags::from_raw(file::O_CREAT | file::O_WRONLY).unwrap();
+    vfs.open(&root, "/dir/file", create).unwrap();
+
+    assert_eq!(vfs.rmdir(&root, "/"), Err(FsError::Busy));
+    assert_eq!(vfs.rmdir(&root, "/dir/.."), Err(FsError::Busy));
+    assert_eq!(vfs.unlink(&root, "/"), Err(FsError::IsDirectory));
+    assert_eq!(vfs.unlink(&root, "/missing"), Err(FsError::NotFound));
+    assert_eq!(vfs.unlink(&root, "/missing/x"), Err(FsError::NotFound));
+    assert_eq!(vfs.rmdir(&root, "/missing"), Err(FsError::NotFound));
+    assert_eq!(vfs.unlink(&root, "/dir/file/x"), Err(FsError::NotDirectory));
+    assert_eq!(vfs.unlink(&root, "/dir"), Err(FsError::IsDirectory));
+    assert_eq!(vfs.rmdir(&root, "/dir/file"), Err(FsError::NotDirectory));
+    assert_eq!(vfs.rmdir(&root, "/dir"), Err(FsError::NotEmpty));
+    assert_eq!(vfs.unlink(&root, ""), Err(FsError::InvalidPath));
+    assert_eq!(vfs.rmdir(&root, ""), Err(FsError::InvalidPath));
+
+    assert!(vfs.stat(&root, "/dir/file").is_ok());
+}
+
+#[test_case]
+fn ramfs_open_file_survives_unlink() {
+    // POSIX semantics: unlink removes the name, and the data lives on until
+    // the last handle is gone. RamFs gets this for free from `Arc`. ext2 does
+    // not (no orphan list), which is a documented limitation.
+    let vfs = ram_vfs();
+    let root = Path::root();
+    let create = OpenFlags::from_raw(file::O_CREAT | file::O_RDWR).unwrap();
+    let mut handle = vfs.open(&root, "/tmpfile", create).unwrap();
+    handle.write(b"still here").unwrap();
+
+    vfs.unlink(&root, "/tmpfile").unwrap();
+    assert_eq!(vfs.stat(&root, "/tmpfile").err(), Some(FsError::NotFound));
+
+    handle.seek(0, SeekWhence::Set).unwrap();
+    let mut buf = [0; 10];
+    assert_eq!(handle.read(&mut buf).unwrap(), 10);
+    assert_eq!(&buf, b"still here");
+}
+
 mod support;
