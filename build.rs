@@ -10,6 +10,8 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("fs_tree_test", "tests/user_programs"),
     ("fs_ops_test", "tests/user_programs"),
     ("tty_test", "tests/user_programs"),
+    ("proc_child", "tests/user_programs"),
+    ("spawn_test", "tests/user_programs"),
     ("nx_exec_test", "tests/user_programs"),
     ("thread_b", "user_programs"),
     ("thread_c", "user_programs"),

@@ -43,9 +43,13 @@
 //! - Switching mode discards the cooked edit line; bytes that are already
 //!   readable stay readable.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use pc_keyboard::{DecodedKey, KeyCode};
 
-use crate::scheduler::wait_queue::WaitQueue;
+use crate::process::process_manager;
+use crate::process::{EXIT_INTERRUPTED, PID};
+use crate::scheduler::wait_queue::{Interrupted, WaitQueue};
 use crate::sync::IrqSafeMutex;
 
 /// Longest cooked edit line, excluding the `\n` added on Enter.
@@ -440,34 +444,81 @@ static TTY: IrqSafeMutex<LineDiscipline> = IrqSafeMutex::new(LineDiscipline::new
 /// Threads blocked in [`read`].
 static READERS: WaitQueue = WaitQueue::new();
 
+/// The process Ctrl-C kills, as a raw PID (0 = none; PID 0 is the kernel,
+/// which can't be the foreground). A shell sets it to the child it's
+/// waiting for (`SYS_TTY_FOREGROUND`). An atomic, so the keyboard IRQ can
+/// read it without a lock.
+static FOREGROUND: AtomicU64 = AtomicU64::new(0);
+
 /// Feed one decoded key into the console. Called from the keyboard IRQ, and
 /// directly by tests. Allocation-free.
+///
+/// A cooked-mode Ctrl-C also asks the foreground process (if any) to exit
+/// with `EXIT_INTERRUPTED`. In raw mode, Ctrl-C is just byte 0x03 for the
+/// reader (Linux: `ISIG` off).
 pub fn push_key(key: DecodedKey) {
-    let (echoed, readable) = {
+    let (echoed, readable, interrupt) = {
         let mut tty = TTY.lock();
+        let interrupt =
+            tty.mode() == TtyMode::Cooked && key == DecodedKey::Unicode(CTRL_C as char);
         let echoed = tty.input(key);
-        (echoed, tty.readable())
+        (echoed, tty.readable(), interrupt)
     };
     // Echo outside the TTY lock: printing takes the VGA/serial locks.
     echo(echoed.as_bytes());
     if readable {
         READERS.wake_all();
     }
+    if interrupt {
+        if let Some(pid) = foreground() {
+            process_manager::request_kill(pid, EXIT_INTERRUPTED);
+        }
+    }
 }
 
 /// Block until the console has input, then copy it into `buf`. Returns the
 /// number of bytes read; 0 means EOF (Ctrl-D in cooked mode).
-pub fn read(buf: &mut [u8]) -> usize {
+///
+/// `Err(Interrupted)` if the reading process gets a kill request (Ctrl-C)
+/// while it waits.
+pub fn read(buf: &mut [u8]) -> Result<usize, Interrupted> {
     if buf.is_empty() {
-        return 0;
+        return Ok(0);
     }
     // Checking and reading under one TTY lock is what stops two readers
     // from both taking the same line: the loser finds nothing readable and
-    // goes back to sleep.
+    // goes back to sleep. The kill check comes first, with no lock held
+    // (it takes SCHEDULER and PROCESS_MANAGER).
     READERS.wait_until(|| {
+        if process_manager::current_kill_requested() {
+            return Some(Err(Interrupted));
+        }
         let mut tty = TTY.lock();
-        tty.readable().then(|| tty.read(buf))
+        tty.readable().then(|| Ok(tty.read(buf)))
     })
+}
+
+/// The process Ctrl-C kills, if any.
+pub fn foreground() -> Option<PID> {
+    match FOREGROUND.load(Ordering::SeqCst) {
+        0 => None,
+        pid => Some(PID(pid)),
+    }
+}
+
+/// Set the process Ctrl-C kills (`None`: nobody), returning the previous one.
+pub fn set_foreground(pid: Option<PID>) -> Option<PID> {
+    let raw = pid.map(|pid| pid.0).unwrap_or(0);
+    match FOREGROUND.swap(raw, Ordering::SeqCst) {
+        0 => None,
+        previous => Some(PID(previous)),
+    }
+}
+
+/// Clear the foreground if it is `pid`. Used once `pid` has been collected,
+/// so a later Ctrl-C can't hit an unrelated process that reuses the PID.
+pub fn clear_foreground_if(pid: PID) {
+    let _ = FOREGROUND.compare_exchange(pid.0, 0, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 pub fn mode() -> TtyMode {

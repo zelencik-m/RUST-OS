@@ -15,6 +15,7 @@ pub const SYS_MKDIR: u64 = 83;
 pub const SYS_RMDIR: u64 = 84;
 pub const SYS_UNLINK: u64 = 87;
 pub const SYS_EXIT: u64 = 60;
+pub const SYS_WAIT4: u64 = 61;
 pub const SYS_GETTID: u64 = 186;
 pub const SYS_GETDENTS64: u64 = 217;
 
@@ -22,3 +23,8 @@ pub const SYS_GETDENTS64: u64 = 217;
 pub const SYS_SLEEP_TICKS: u64 = 1000;
 // tty_mode(fd, mode): 0 = cooked, 1 = raw. Returns the previous mode.
 pub const SYS_TTY_MODE: u64 = 1001;
+// spawn(path, argv): start `path` as a child process. Returns its pid.
+pub const SYS_SPAWN: u64 = 1002;
+// tty_foreground(fd, pid): the process Ctrl-C kills (0 = none). Returns the
+// previous one.
+pub const SYS_TTY_FOREGROUND: u64 = 1003;

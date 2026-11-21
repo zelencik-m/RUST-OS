@@ -1,6 +1,7 @@
 use alloc::alloc::{GlobalAlloc, Layout};
 use core::ptr::null_mut;
 use buddy_allocator::BuddyAllocator;
+use crate::sync::{IrqSafeMutex, IrqSafeMutexGuard};
 use x86_64::{
     VirtAddr,
     structures::paging::{
@@ -61,18 +62,26 @@ pub fn init_heap(
     Ok(())
 }
 
+/// The heap allocator's lock. It disables interrupts while held.
+///
+/// With a plain spin lock, a thread preempted in the middle of `alloc` would
+/// keep holding it, and any interrupt handler that then allocates or frees
+/// would spin forever, since nothing can preempt an interrupt handler. That
+/// is not hypothetical: the timer interrupt runs the scheduler, whose reaper
+/// frees dead threads' kernel stacks, and process exit (from a fault or a
+/// Ctrl-C kill) frees an address space from interrupt context.
 pub struct Locked<A> {
-    inner: spin::Mutex<A>,
+    inner: IrqSafeMutex<A>,
 }
 
 impl<A> Locked<A> {
     pub const fn new(inner: A) -> Self {
         Locked {
-            inner: spin::Mutex::new(inner),
+            inner: IrqSafeMutex::new(inner),
         }
     }
 
-    pub fn lock(&self) -> spin::MutexGuard<'_, A> {
+    pub fn lock(&self) -> IrqSafeMutexGuard<'_, A> {
         self.inner.lock()
     }
 }

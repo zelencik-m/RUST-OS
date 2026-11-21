@@ -57,6 +57,16 @@ impl ProcessManager {
             .expect("process(): invalid or empty process slot")
     }
 
+    /// The process in slot `pid`, or `None` if there is none (never created,
+    /// or destroyed and not reused yet).
+    pub fn try_process(&self, pid: PID) -> Option<&Process> {
+        self.processes.get(pid.0 as usize).and_then(Option::as_ref)
+    }
+
+    pub fn try_process_mut(&mut self, pid: PID) -> Option<&mut Process> {
+        self.processes.get_mut(pid.0 as usize).and_then(Option::as_mut)
+    }
+
     pub fn process_mut(&mut self, pid: PID) -> &mut Process {
         self.processes
             .get_mut(pid.0 as usize)

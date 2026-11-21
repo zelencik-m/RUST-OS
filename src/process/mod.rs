@@ -3,6 +3,7 @@ pub mod thread;
 pub mod idle;
 pub mod elf_loader;
 pub mod usermode;
+pub mod initial_stack;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -11,6 +12,23 @@ use crate::fs::{File, FsError, Path};
 use crate::fs::devices::{stdin_file, stdout_file, stderr_file};
 use crate::process::thread::TID;
 use crate::memory::AddressSpace;
+use crate::scheduler::wait_queue::WaitQueue;
+
+/// Exit code of a process killed by a fatal CPU exception (page fault,
+/// #GP, ...). Shells report 128 + signal number, and Linux sends SIGSEGV
+/// (11) for these faults.
+pub const EXIT_FAULT: i32 = 128 + 11;
+/// Exit code of a process killed by Ctrl-C: 128 + SIGINT (2).
+pub const EXIT_INTERRUPTED: i32 = 128 + 2;
+
+/// Woken every time a process exits. `wait4` blocks here until the child it
+/// waits for has exited.
+///
+/// One queue for the whole system, not one per parent: `wake_all` takes the
+/// SCHEDULER and PROCESS_MANAGER locks itself, so it can't be reached from
+/// inside a `Process` while PROCESS_MANAGER is held. Waking every waiter on
+/// every exit is fine: each one re-checks its own child and sleeps again.
+pub static CHILD_EXITS: WaitQueue = WaitQueue::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PID(pub u64);
@@ -51,6 +69,18 @@ pub struct Process {
 
     /// Canonical absolute current working directory.
     pub cwd: Path,
+
+    /// `None` while the process runs. Set once, when its last thread exits:
+    /// the code `wait4` reports. A process whose parent is a live user
+    /// process stays in the process table with this set (a *zombie*) until
+    /// that parent collects it with `wait4`.
+    pub exit_code: Option<i32>,
+
+    /// A kill has been requested (Ctrl-C), with this exit code. The process
+    /// is not torn down from outside. Its own thread exits at the next safe
+    /// point: on the way back to user mode from a syscall, or on a timer
+    /// tick that interrupted user mode. See `request_kill`.
+    pub pending_kill: Option<i32>,
 }
 
 impl Process {
@@ -67,6 +97,8 @@ impl Process {
             address_space: None,
             fd_table: Vec::new(),
             cwd: Path::root(),
+            exit_code: None,
+            pending_kill: None,
         }
     }
 
@@ -88,6 +120,25 @@ impl Process {
 
     pub fn add_child(&mut self, child_pid: PID) {
         self.identity.children.push(child_pid);
+    }
+
+    /// Empty the `children` list and return what was in it.
+    pub fn take_children(&mut self) -> Vec<PID> {
+        core::mem::take(&mut self.identity.children)
+    }
+
+    pub fn remove_child(&mut self, child_pid: PID) {
+        self.identity.children.retain(|&pid| pid != child_pid);
+    }
+
+    /// Re-parent this process (e.g. to PID 0 when its parent exits). Callers
+    /// keep both parents' `children` lists in sync.
+    pub fn set_parent(&mut self, parent: PID) {
+        self.identity.parent = Some(parent);
+    }
+
+    pub fn is_user(&self) -> bool {
+        matches!(self.identity.process_type, ProcessType::User)
     }
 
     pub fn get_children(&self) -> &Vec<PID> {

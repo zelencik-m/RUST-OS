@@ -48,13 +48,29 @@ impl ProcessManager {
             mm.allocate_user_stack(space)?
         };
 
+        Ok(self.create_user_thread_with_stack_locked(pid, entry_point, user_stack))
+    }
+
+    /// Create a user thread of `pid` that enters ring 3 at `entry_point` with
+    /// stack pointer `user_rsp`. The stack must already be mapped (and hold
+    /// the argv image, if any).
+    ///
+    /// The thread is `Ready` but **not** on the run queue: the caller enqueues
+    /// it (`SCHEDULER.add_runnable`) once the process is complete. That's what
+    /// lets `spawn_process` finish setting up before the thread can run.
+    pub fn create_user_thread_with_stack_locked(
+        &mut self,
+        pid: PID,
+        entry_point: VirtAddr,
+        user_rsp: VirtAddr,
+    ) -> TID {
         let tid = if let Some(free_tid) = self.free_tids.pop() {
             free_tid
         } else {
             TID(self.threads.len() as u64)
         };
 
-        let thread = Box::new(Thread::new_user(tid, pid, 4096 * 4, entry_point, user_stack));
+        let thread = Box::new(Thread::new_user(tid, pid, 4096 * 4, entry_point, user_rsp));
 
         if (tid.0 as usize) < self.threads.len() {
             self.threads[tid.0 as usize] = Some(thread);
@@ -63,7 +79,7 @@ impl ProcessManager {
         }
 
         self.process_mut(pid).threads.push(tid);
-        Ok(tid)
+        tid
     }
 
     pub fn create_idle_thread_locked(&mut self, entry: extern "C" fn() -> !) -> TID {
@@ -128,6 +144,11 @@ impl ProcessManager {
     /// If `pid` has no threads left, drop the `Process` and recycle the PID.
     /// The address space was normally already destroyed by `kill_current_thread`
     /// when the last thread died; we still tear it down defensively.
+    ///
+    /// Zombies are kept: a process that has exited while its parent is a
+    /// live user process stays until that parent collects it with `wait4`
+    /// (`wait_child`). Kernel-parented processes (parent PID 0) are freed
+    /// right away, because nobody will ever wait for them.
     fn finalize_process_if_empty(&mut self, pid: PID) {
         if pid == PID(0) {
             return; // never destroy the kernel process
@@ -140,6 +161,13 @@ impl ProcessManager {
         if !should_finalize {
             return;
         }
+        let parent = self.process(pid).parent();
+        let parent_may_wait = self.process(pid).exit_code.is_some()
+            && matches!(parent, Some(parent) if parent != PID(0) && self.is_live_user_process(parent));
+        if parent_may_wait {
+            return; // a zombie: wait_child frees it
+        }
+        self.unlink_from_parent(pid);
         // Release any address space left behind during thread teardown.
         if let Some(mut space) = self.process_mut(pid).address_space.take() {
             let mut mm_guard = crate::memory::memory_manager::MEMORY_MANAGER.lock();

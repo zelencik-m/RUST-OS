@@ -22,8 +22,9 @@ impl Inode for ConsoleInode {
 
     fn read_at(&self, _offset: u64, buf: &mut [u8]) -> Result<usize, FsError> {
         match self.kind {
-            // Blocks until the keyboard has produced input.
-            ConsoleKind::Stdin => Ok(crate::tty::read(buf)),
+            // Blocks until the keyboard has produced input, or the reading
+            // process is killed.
+            ConsoleKind::Stdin => crate::tty::read(buf).map_err(|_| FsError::Interrupted),
             ConsoleKind::Stdout | ConsoleKind::Stderr => Err(FsError::ReadOnly),
         }
     }

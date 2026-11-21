@@ -78,7 +78,7 @@ extern "C" fn flag_waiter() -> ! {
 
 extern "C" fn tty_reader() -> ! {
     let mut buf = [0u8; 64];
-    let n = tty::read(&mut buf);
+    let n = tty::read(&mut buf).expect("kernel threads are never killed");
     READS.lock().push(buf[..n].to_vec());
     park()
 }

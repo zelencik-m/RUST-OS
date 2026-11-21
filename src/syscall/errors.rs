@@ -17,6 +17,12 @@ pub enum SysError {
     Enotty,
     Erange,
     Enotempty,
+    Esrch,
+    Eintr,
+    E2big,
+    Enoexec,
+    Echild,
+    Eacces,
 }
 
 impl SysError {
@@ -37,6 +43,12 @@ impl SysError {
             SysError::Enotty => (-25i64) as u64,
             SysError::Erange => (-34i64) as u64,
             SysError::Enotempty => (-39i64) as u64,
+            SysError::Esrch => (-3i64) as u64,
+            SysError::Eintr => (-4i64) as u64,
+            SysError::E2big => (-7i64) as u64,
+            SysError::Enoexec => (-8i64) as u64,
+            SysError::Echild => (-10i64) as u64,
+            SysError::Eacces => (-13i64) as u64,
         }
     }
 
@@ -55,6 +67,7 @@ impl SysError {
             FsError::Io => SysError::Eio,
             FsError::NotInitialized => SysError::Eio,
             FsError::TooManyFiles => SysError::Emfile,
+            FsError::Interrupted => SysError::Eintr,
         }
     }
 }

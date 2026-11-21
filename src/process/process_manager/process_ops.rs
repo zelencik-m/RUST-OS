@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use x86_64::registers::control::Cr3;
 
 use crate::memory::address_space::AddressSpace;
-use crate::process::thread::TID;
+use crate::process::thread::{ThreadState, TID};
 use crate::process::{PID, Process, ProcessType};
 
 use super::manager::ProcessManager;
@@ -76,7 +76,58 @@ impl ProcessManager {
         pid
     }
 
-pub fn destroy_process(&mut self, pid: PID) {
+    /// Whether `pid` is a user process that hasn't exited, i.e. one that
+    /// may still `wait4` for its children.
+    pub fn is_live_user_process(&self, pid: PID) -> bool {
+        self.try_process(pid)
+            .map(|process| process.is_user() && process.exit_code.is_none())
+            .unwrap_or(false)
+    }
+
+    /// Whether a thread of `pid` is still alive (not `Exited`/`Zombie`).
+    pub fn has_live_threads(&self, pid: PID) -> bool {
+        self.process(pid).threads.iter().any(|&tid| {
+            !matches!(
+                self.thread(tid).get_state(),
+                ThreadState::Exited | ThreadState::Zombie
+            )
+        })
+    }
+
+    /// Hand every child of `pid` (which is exiting) to the kernel, PID 0.
+    ///
+    /// The kernel never waits, so children that are already zombies and have
+    /// no threads left are freed now. A zombie whose thread hasn't been reaped
+    /// yet is freed by the reaper instead (`finalize_process_if_empty`), now
+    /// that its parent is PID 0. Live children are freed when they exit.
+    pub fn reparent_children_to_kernel(&mut self, pid: PID) {
+        let children = self.process_mut(pid).take_children();
+        for child in children {
+            let Some(process) = self.try_process_mut(child) else {
+                continue;
+            };
+            process.set_parent(PID(0));
+            let unwanted_zombie = process.exit_code.is_some() && process.threads.is_empty();
+            if unwanted_zombie {
+                self.destroy_process(child);
+            } else {
+                self.process_mut(PID(0)).add_child(child);
+            }
+        }
+    }
+
+    /// Unlink `child` from its parent's `children` list (if the parent is
+    /// still there). Call this before freeing a process.
+    pub fn unlink_from_parent(&mut self, child: PID) {
+        let parent = self.try_process(child).and_then(|process| process.parent());
+        if let Some(parent) = parent {
+            if let Some(parent) = self.try_process_mut(parent) {
+                parent.remove_child(child);
+            }
+        }
+    }
+
+    pub fn destroy_process(&mut self, pid: PID) {
         let tids: Vec<TID> = self.process(pid).threads.clone();
         for tid in tids {
             self.remove_thread_locked(tid);

@@ -1,7 +1,9 @@
 use crate::memory::address_space::{is_user_range, USER_SPACE_END, USER_SPACE_START};
+use crate::process::initial_stack::MAX_ARGS;
 use crate::process::process_manager::{
-    get_current_brk, kill_current_thread_and_schedule, sys_brk, sys_mmap_anonymous,
-    sys_munmap, PROCESS_MANAGER,
+    exit_current_thread, exit_if_killed, get_current_brk, spawn_process, sys_brk,
+    sys_mmap_anonymous, sys_munmap, wait_child, SpawnArgs, SpawnError, WaitError,
+    PROCESS_MANAGER,
 };
 use crate::process::thread::TID;
 use crate::process::PID;
@@ -13,12 +15,17 @@ use crate::syscall::uaccess::{
     canonical_user_addr, copy_c_string_from_user, copy_from_user, copy_to_user,
     validate_user_range,
 };
-use crate::fs::{with_vfs, FileType, FsError, InodeRef, OpenFlags, Path, SeekWhence};
+use crate::fs::{with_vfs, File, FileType, FsError, InodeRef, OpenFlags, Path, SeekWhence};
+use alloc::string::String;
 use alloc::vec::Vec;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
 const PATH_MAX: usize = 4096;
+
+/// Largest program file `spawn` loads. Programs are read whole into the
+/// kernel heap (10 MiB) before they are loaded.
+const MAX_PROGRAM_SIZE: u64 = 4 * 1024 * 1024;
 
 #[no_mangle]
 extern "C" fn syscall_int_handler(frame: &mut SyscallFrame) {
@@ -33,10 +40,15 @@ extern "C" fn syscall_int_handler(frame: &mut SyscallFrame) {
     let pid = PROCESS_MANAGER.lock().thread(tid).get_owner();
 
     if frame.rax == SYS_EXIT {
-        kill_current_thread_and_schedule(tid);
+        // Like Linux, only the low 8 bits of the status survive.
+        exit_current_thread(tid, (frame.rdi & 0xff) as i32);
     }
 
     frame.rax = dispatch(pid, tid, frame);
+
+    // Safe point for a pending kill (Ctrl-C), on the way back to user mode.
+    // A blocking syscall cut short by the kill returns EINTR first.
+    exit_if_killed(tid);
 }
 
 fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
@@ -63,6 +75,9 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
         SYS_SCHED_YIELD => ret(sys_yield()),
         SYS_SLEEP_TICKS => ret(sys_sleep_ticks(args[0])),
         SYS_TTY_MODE => ret(sys_tty_mode(pid, args[0], args[1])),
+        SYS_TTY_FOREGROUND => ret(sys_tty_foreground(pid, args[0], args[1])),
+        SYS_SPAWN => ret(sys_spawn(pid, args[0], args[1])),
+        SYS_WAIT4 => ret(sys_wait4(pid, args[0], args[1], args[2], args[3])),
         SYS_GETPID => pid.0,
         SYS_GETTID => tid.0,
         SYS_MKDIR => ret(sys_mkdir(pid, args[0], args[1])),
@@ -275,9 +290,8 @@ fn sys_write(
     Ok(total as u64)
 }
 
-/// `tty_mode(fd, mode)`: switch the console between cooked (0) and raw (1)
-/// and return the previous mode. `ENOTTY` if `fd` is not the console.
-fn sys_tty_mode(pid: PID, fd: u64, raw_mode: u64) -> Result<u64, SysError> {
+/// `EBADF` if `fd` isn't open, `ENOTTY` if it isn't the console.
+fn require_terminal(pid: PID, fd: u64) -> Result<(), SysError> {
     let is_terminal = PROCESS_MANAGER
         .lock()
         .process_mut(pid)
@@ -285,11 +299,194 @@ fn sys_tty_mode(pid: PID, fd: u64, raw_mode: u64) -> Result<u64, SysError> {
         .map_err(SysError::from_fs_error)?
         .inode()
         .is_terminal();
-    if !is_terminal {
-        return Err(SysError::Enotty);
+    if is_terminal {
+        Ok(())
+    } else {
+        Err(SysError::Enotty)
     }
+}
+
+/// `tty_mode(fd, mode)`: switch the console between cooked (0) and raw (1)
+/// and return the previous mode. `ENOTTY` if `fd` is not the console.
+fn sys_tty_mode(pid: PID, fd: u64, raw_mode: u64) -> Result<u64, SysError> {
+    require_terminal(pid, fd)?;
     let mode = crate::tty::TtyMode::from_raw(raw_mode).ok_or(SysError::Einval)?;
     Ok(crate::tty::set_mode(mode).as_raw())
+}
+
+/// `tty_foreground(fd, pid)`: make `pid` the process a cooked-mode Ctrl-C
+/// kills (0: nobody), and return the previous one (0: nobody). Like Linux's
+/// `tcsetpgrp`, minus process groups.
+///
+/// `fd` must be the console (`EBADF`/`ENOTTY`). `pid` must be one of the
+/// caller's children (`ESRCH`), so a program can't make Ctrl-C kill an
+/// unrelated process. `wait4` clears it again once that child is collected.
+fn sys_tty_foreground(pid: PID, fd: u64, target: u64) -> Result<u64, SysError> {
+    require_terminal(pid, fd)?;
+    let target = if target == 0 {
+        None
+    } else {
+        let pm = PROCESS_MANAGER.lock();
+        match pm.try_process(PID(target)) {
+            Some(child) if child.parent() == Some(pid) => Some(PID(target)),
+            _ => return Err(SysError::Esrch),
+        }
+    };
+    Ok(crate::tty::set_foreground(target).map(|p| p.0).unwrap_or(0))
+}
+
+/// `spawn(path, argv)`: start the program at `path` (resolved against the
+/// cwd) as a child process, and return the child's pid. A rust-os syscall,
+/// the shell's replacement for `fork` + `execve`.
+///
+/// - `argv` is a NULL-terminated array of string pointers, like `execve`'s.
+///   It becomes the child's `argc`/`argv` as given (pass the program name
+///   as `argv[0]`). A NULL `argv` means no arguments (`argc` 0).
+/// - The child inherits the cwd and fds 0–2. Each one is the same open file
+///   (`File::share`), not a copy, so output written by parent and child
+///   lands in order. Closed fds stay closed.
+/// - Errors: `ENOENT`/`ENOTDIR` (path), `EACCES` (not a regular file),
+///   `ENOEXEC` (not an x86_64 ELF), `E2BIG` (more than `MAX_ARGS`
+///   arguments, or too large for the initial stack), `EFAULT` (bad pointer),
+///   `EINVAL` (an argument has no NUL within `PATH_MAX`, or isn't UTF-8),
+///   `ENOMEM`.
+fn sys_spawn(pid: PID, user_path: u64, user_argv: u64) -> Result<u64, SysError> {
+    let raw_path = copy_c_string_from_user(pid, user_path, PATH_MAX)?;
+    let args = copy_argv_from_user(pid, user_argv)?;
+    let cwd = process_cwd(pid);
+    let path = Path::resolve(&cwd, &raw_path).map_err(SysError::from_fs_error)?;
+    let elf = read_program(&path)?;
+
+    let stdio = {
+        let pm = PROCESS_MANAGER.lock();
+        let process = pm.process(pid);
+        [0usize, 1, 2].map(|fd| {
+            process
+                .fd_table
+                .get(fd)
+                .and_then(Option::as_ref)
+                .map(File::share)
+        })
+    };
+
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (child, _) = spawn_process(SpawnArgs {
+        parent: pid,
+        name: String::from(path.file_name().unwrap_or("/")),
+        elf: &elf,
+        argv: &argv,
+        cwd,
+        stdio,
+    })
+    .map_err(|error| match error {
+        SpawnError::Oom => SysError::Enomem,
+        SpawnError::ArgsTooLarge => SysError::E2big,
+    })?;
+    Ok(child.0)
+}
+
+/// Copy a NULL-terminated `char *argv[]` out of user memory.
+fn copy_argv_from_user(pid: PID, user_argv: u64) -> Result<Vec<String>, SysError> {
+    let mut args = Vec::new();
+    if user_argv == 0 {
+        return Ok(args);
+    }
+    loop {
+        let slot = user_argv
+            .checked_add(8 * args.len() as u64)
+            .ok_or(SysError::Efault)?;
+        let mut pointer = [0u8; 8];
+        copy_from_user(pid, validate_user_range(slot, 8)?, &mut pointer)?;
+        let pointer = u64::from_le_bytes(pointer);
+        if pointer == 0 {
+            return Ok(args);
+        }
+        if args.len() == MAX_ARGS {
+            return Err(SysError::E2big);
+        }
+        args.push(copy_c_string_from_user(pid, pointer, PATH_MAX)?);
+    }
+}
+
+/// Read a whole program file for `spawn`, checking that it is a regular
+/// file and an x86_64 ELF.
+fn read_program(path: &Path) -> Result<Vec<u8>, SysError> {
+    let root = Path::root();
+    // The outer Result is the VFS's, the inner one is spawn's own checks.
+    let bytes = with_vfs(|vfs| -> Result<Result<Vec<u8>, SysError>, FsError> {
+        let stat = vfs.stat(&root, path.as_str())?;
+        if stat.file_type != FileType::Regular {
+            return Ok(Err(SysError::Eacces));
+        }
+        if stat.size > MAX_PROGRAM_SIZE {
+            return Ok(Err(SysError::Enomem));
+        }
+        let mut file = vfs.open(&root, path.as_str(), OpenFlags::read_only())?;
+        let mut bytes = alloc::vec![0u8; stat.size as usize];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            let n = file.read(&mut bytes[filled..])?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        bytes.truncate(filled);
+        Ok(Ok(bytes))
+    })
+    .map_err(SysError::from_fs_error)??;
+
+    // e_ident: magic, ELFCLASS64, little-endian; e_machine: x86_64.
+    let is_x86_64_elf = bytes.len() >= 20
+        && bytes[..4] == *b"\x7fELF"
+        && bytes[4] == 2
+        && bytes[5] == 1
+        && u16::from_le_bytes([bytes[18], bytes[19]]) == 0x3e;
+    if !is_x86_64_elf {
+        return Err(SysError::Enoexec);
+    }
+    Ok(bytes)
+}
+
+/// `wait4(pid, status, options, rusage)`: wait for child `pid` to exit,
+/// collect it, and return `pid`.
+///
+/// Differences from Linux:
+/// - Only `pid > 0` (one specific child) is supported. `-1` (any child) and
+///   process groups give `EINVAL`, as does any `options` flag.
+/// - `*status` (an `int`, skipped if `status` is NULL) receives the plain
+///   exit code (0–255; 130 after Ctrl-C, 139 after a fault), not Linux's
+///   encoded wait status. There are no `WEXITSTATUS` macros to decode.
+/// - `rusage` is ignored.
+///
+/// `ECHILD` if `pid` isn't a child of the caller (or was already
+/// collected). `EINTR` if the caller is killed while waiting.
+fn sys_wait4(
+    pid: PID,
+    child: u64,
+    user_status: u64,
+    options: u64,
+    _rusage: u64,
+) -> Result<u64, SysError> {
+    if (child as i64) <= 0 || options != 0 {
+        return Err(SysError::Einval);
+    }
+    let status = match user_status {
+        0 => None,
+        address => Some(validate_user_range(address, 4)?),
+    };
+
+    let child = PID(child);
+    let code = wait_child(pid, child).map_err(|error| match error {
+        WaitError::NotChild => SysError::Echild,
+        WaitError::Interrupted => SysError::Eintr,
+    })?;
+    crate::tty::clear_foreground_if(child);
+
+    if let Some(address) = status {
+        copy_to_user(pid, address, &code.to_le_bytes())?;
+    }
+    Ok(child.0)
 }
 
 fn sys_lseek(

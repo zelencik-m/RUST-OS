@@ -1,3 +1,6 @@
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use super::error::FsError;
 use super::inode::{FileStat, FileType, InodeRef};
 
@@ -88,9 +91,15 @@ impl SeekWhence {
     }
 }
 
+/// An open file: an inode, access flags and a file offset.
+///
+/// The offset lives behind an `Arc`, so [`File::share`] can give a child
+/// process the *same* open file (Linux's "open file description"), not a
+/// copy. A parent and the child it spawned then write into a shared stdout
+/// one after the other, and neither one overwrites what the other wrote.
 pub struct File {
     inode: InodeRef,
-    offset: u64,
+    offset: Arc<AtomicU64>,
     flags: OpenFlags,
 }
 
@@ -104,9 +113,24 @@ impl File {
 
         Ok(Self {
             inode,
-            offset,
+            offset: Arc::new(AtomicU64::new(offset)),
             flags,
         })
+    }
+
+    /// Another handle to this open file, sharing its offset (like `dup`).
+    /// Spawn uses it for the stdio a child inherits.
+    ///
+    /// Each read or write loads the offset, does the I/O, then stores the
+    /// new offset. Two processes using one shared file at the same moment
+    /// could interleave those steps. That's fine for how it's used: a parent
+    /// shell waits while its child runs.
+    pub fn share(&self) -> File {
+        File {
+            inode: self.inode.clone(),
+            offset: self.offset.clone(),
+            flags: self.flags,
+        }
     }
 
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, FsError> {
@@ -117,8 +141,9 @@ impl File {
             return Err(FsError::IsDirectory);
         }
 
-        let n = self.inode.read_at(self.offset, buf)?;
-        self.offset = self.offset.saturating_add(n as u64);
+        let offset = self.offset();
+        let n = self.inode.read_at(offset, buf)?;
+        self.set_offset(offset.saturating_add(n as u64));
         Ok(n)
     }
 
@@ -130,19 +155,21 @@ impl File {
             return Err(FsError::IsDirectory);
         }
 
-        if self.flags.append() {
-            self.offset = self.inode.len()?;
-        }
+        let offset = if self.flags.append() {
+            self.inode.len()?
+        } else {
+            self.offset()
+        };
 
-        let n = self.inode.write_at(self.offset, buf)?;
-        self.offset = self.offset.saturating_add(n as u64);
+        let n = self.inode.write_at(offset, buf)?;
+        self.set_offset(offset.saturating_add(n as u64));
         Ok(n)
     }
 
     pub fn seek(&mut self, offset: i64, whence: SeekWhence) -> Result<u64, FsError> {
         let base = match whence {
             SeekWhence::Set => 0i128,
-            SeekWhence::Cur => self.offset as i128,
+            SeekWhence::Cur => self.offset() as i128,
             SeekWhence::End => self.inode.len()? as i128,
         };
 
@@ -151,8 +178,8 @@ impl File {
             return Err(FsError::InvalidFlags);
         }
 
-        self.offset = new_offset as u64;
-        Ok(self.offset)
+        self.set_offset(new_offset as u64);
+        Ok(new_offset as u64)
     }
 
     pub fn truncate(&mut self, size: u64) -> Result<(), FsError> {
@@ -175,7 +202,11 @@ impl File {
     }
 
     pub fn offset(&self) -> u64 {
-        self.offset
+        self.offset.load(Ordering::SeqCst)
+    }
+
+    fn set_offset(&self, offset: u64) {
+        self.offset.store(offset, Ordering::SeqCst);
     }
 
     pub fn inode(&self) -> InodeRef {

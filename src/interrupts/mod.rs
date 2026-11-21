@@ -191,7 +191,10 @@ global_asm!(
     "push r9",
     "push r10",
     "push r11",
-    
+
+    // Argument: the CPU-pushed interrupt frame (RIP, CS, RFLAGS, RSP, SS),
+    // above the 9 saved registers and the 128-byte red-zone skip.
+    "lea rdi, [rsp + 9*8 + 128]",
     "call timer_interrupt_rust_handler",
     
     // Pop caller-saved registers (restores the new thread's state)
@@ -213,7 +216,11 @@ extern "C" {
 }
 
 #[no_mangle]
-extern "C" fn timer_interrupt_rust_handler() {
+extern "C" fn timer_interrupt_rust_handler(frame: *const u64) {
+    // frame[1] is the interrupted code segment. Its low two bits are the
+    // privilege level it ran at: 3 means the timer interrupted user mode.
+    let from_user = unsafe { *frame.add(1) } & 0x3 == 3;
+
     let should_switch = SCHEDULER.lock().tick(); // lock dropped immediately
 
     unsafe {
@@ -222,6 +229,19 @@ extern "C" fn timer_interrupt_rust_handler() {
 
     if should_switch {
         yield_now(); // safe now: PIC EOI already sent, lock already released
+    }
+
+    // A safe point for a pending kill (Ctrl-C): this thread was running user
+    // code, so it holds no kernel locks and has no syscall half done. This is
+    // how a program that never makes a syscall still gets killed.
+    if from_user {
+        // Not `if let Some(tid) = SCHEDULER.lock()...`: a temporary in an
+        // `if let` lives until the end of the block, so SCHEDULER would
+        // still be locked when the exit path locks it again.
+        let current = SCHEDULER.lock().get_current();
+        if let Some(tid) = current {
+            crate::process::process_manager::exit_if_killed(tid);
+        }
     }
 }
 extern "x86-interrupt" fn breakpoint_handler(

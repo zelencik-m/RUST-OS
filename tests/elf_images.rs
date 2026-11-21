@@ -66,6 +66,14 @@ fn embedded_user_programs_are_x86_64_elfs() {
             "tty_test",
             include_bytes!(concat!(env!("OUT_DIR"), "/tty_test.elf")) as &[u8],
         ),
+        (
+            "proc_child",
+            include_bytes!(concat!(env!("OUT_DIR"), "/proc_child.elf")) as &[u8],
+        ),
+        (
+            "spawn_test",
+            include_bytes!(concat!(env!("OUT_DIR"), "/spawn_test.elf")) as &[u8],
+        ),
     ] {
         assert_x86_64_elf(name, image);
     }

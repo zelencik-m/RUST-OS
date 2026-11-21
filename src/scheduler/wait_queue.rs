@@ -14,6 +14,14 @@ use crate::process::thread::{ThreadState, TID};
 use crate::scheduler::scheduler::{schedule_with_interrupts_disabled, SCHEDULER};
 use crate::sync::IrqSafeMutex;
 
+/// A blocking wait gave up because the waiting process is being killed
+/// (Ctrl-C). Waits that a kill must be able to cut short (`tty::read`,
+/// `wait_child`) check for it in their condition and return this. The
+/// syscall then fails with `EINTR`, and the process exits on its way back
+/// to user mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interrupted;
+
 pub struct WaitQueue {
     /// Threads that went to sleep on this queue, in arrival order.
     ///

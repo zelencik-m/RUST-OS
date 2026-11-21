@@ -52,6 +52,8 @@ elf!(RING3_EXCEPTION, "ring3_exception_test");
 elf!(NX_EXEC, "nx_exec_test");
 elf!(FS_OPS, "fs_ops_test");
 elf!(TTY_TEST, "tty_test");
+elf!(SPAWN_TEST, "spawn_test");
+elf!(PROC_CHILD, "proc_child");
 
 #[derive(Clone)]
 struct UserCase {
@@ -267,6 +269,14 @@ fn run_user_elf_smoke_programs() {
     let capture_fs = Arc::new(RamFs::new());
     let root = capture_fs.root();
     *VFS.lock() = Some(Vfs::new(capture_fs));
+    // spawn_test starts /bin/proc_child.
+    let bin = root
+        .create_child("bin", rust_os::fs::FileType::Directory)
+        .unwrap();
+    bin.create_child("proc_child", rust_os::fs::FileType::Regular)
+        .unwrap()
+        .write_at(0, &PROC_CHILD.0)
+        .unwrap();
 
     let mut cases = Vec::new();
     cases.push(add_case(
@@ -297,6 +307,19 @@ fn run_user_elf_smoke_programs() {
     let mut tty_case = add_case("tty_test", &TTY_TEST.0, "tty_test: passed", &root);
     tty_case.input = Some("hello\n\u{4}");
     cases.push(tty_case);
+    // Its children inherit stdout, so their output comes before the final
+    // line. It reads nothing itself, but its `read` child must not take
+    // tty_test's input, so it starts after tty_test. The runner types
+    // Ctrl-C when it first blocks (in wait4 for that child).
+    let mut spawn_case = add_case(
+        "spawn_test",
+        &SPAWN_TEST.0,
+        "argv:proc_child|echo|hi\ncwd:/bin\nspawn_test: passed\n",
+        &root,
+    );
+    spawn_case.start_after = Some("tty_test");
+    spawn_case.input = Some("\u{3}");
+    cases.push(spawn_case);
     cases.push(add_case(
         "ring3_exception_test",
         &RING3_EXCEPTION.0,
