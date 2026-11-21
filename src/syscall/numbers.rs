@@ -20,3 +20,5 @@ pub const SYS_GETDENTS64: u64 = 217;
 
 // Custom helper syscall for testing.
 pub const SYS_SLEEP_TICKS: u64 = 1000;
+// tty_mode(fd, mode): 0 = cooked, 1 = raw. Returns the previous mode.
+pub const SYS_TTY_MODE: u64 = 1001;

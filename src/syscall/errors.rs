@@ -14,6 +14,7 @@ pub enum SysError {
     Eio,
     Emfile,
     Ebusy,
+    Enotty,
     Erange,
     Enotempty,
 }
@@ -33,6 +34,7 @@ impl SysError {
             SysError::Eio => (-5i64) as u64,
             SysError::Emfile => (-24i64) as u64,
             SysError::Ebusy => (-16i64) as u64,
+            SysError::Enotty => (-25i64) as u64,
             SysError::Erange => (-34i64) as u64,
             SysError::Enotempty => (-39i64) as u64,
         }

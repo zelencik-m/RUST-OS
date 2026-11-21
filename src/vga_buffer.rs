@@ -51,17 +51,71 @@ struct Buffer {
 }
 
 
+/// Text-mode writer. Output always goes to the bottom row, and the screen
+/// scrolls up on a newline. The cursor is therefore always on the bottom row.
+///
+/// Control bytes (enough for a line editor that redraws its line):
+/// - `\n`: new line
+/// - `\r`: back to column 0
+/// - `\x08` (backspace): one column left, without erasing; no-op at column 0
+/// - `\x0c` (form feed): clear the screen, cursor to column 0
+///
+/// Known limitation: there's no way back to the row above, so text that
+/// wraps past column 80 can't be redrawn with `\r`.
 pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
     buffer: &'static mut Buffer,
+    /// Whether the hardware cursor's shape has been programmed yet.
+    cursor_enabled: bool,
 }
 
+/// VGA CRT controller ports: write a register index to 0x3D4, then read or
+/// write that register through 0x3D5.
+const CRTC_INDEX: u16 = 0x3D4;
+const CRTC_DATA: u16 = 0x3D5;
+const CRTC_CURSOR_START: u8 = 0x0A;
+const CRTC_CURSOR_END: u8 = 0x0B;
+const CRTC_CURSOR_HIGH: u8 = 0x0E;
+const CRTC_CURSOR_LOW: u8 = 0x0F;
+
+fn crtc_write(register: u8, value: u8) {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        Port::<u8>::new(CRTC_INDEX).write(register);
+        Port::<u8>::new(CRTC_DATA).write(value);
+    }
+}
+
+fn crtc_read(register: u8) -> u8 {
+    use x86_64::instructions::port::Port;
+    unsafe {
+        Port::<u8>::new(CRTC_INDEX).write(register);
+        Port::<u8>::new(CRTC_DATA).read()
+    }
+}
+
+/// The hardware cursor's position as a cell index (`row * 80 + column`).
+pub fn hardware_cursor() -> usize {
+    let high = crtc_read(CRTC_CURSOR_HIGH) as usize;
+    let low = crtc_read(CRTC_CURSOR_LOW) as usize;
+    (high << 8) | low
+}
 
 impl Writer {
+    /// Write one byte (printable or a supported control byte) and move the
+    /// hardware cursor.
     pub fn write_byte(&mut self, byte: u8) {
+        self.put_byte(byte);
+        self.update_cursor();
+    }
+
+    fn put_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
+            b'\r' => self.column_position = 0,
+            0x08 => self.column_position = self.column_position.saturating_sub(1),
+            0x0c => self.clear_screen(),
             byte => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -91,6 +145,33 @@ impl Writer {
         self.column_position = 0;
     }
 
+    /// Blank every row and put the cursor at column 0 of the bottom row.
+    pub fn clear_screen(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
+        self.column_position = 0;
+    }
+
+    /// Move the blinking hardware cursor to where the next character goes.
+    fn update_cursor(&mut self) {
+        if !self.cursor_enabled {
+            // Scanlines 14-15 (an underline). Bit 5 of the start register
+            // disables the cursor, so it stays clear; keep the reserved bits.
+            let start = crtc_read(CRTC_CURSOR_START) & 0xC0;
+            crtc_write(CRTC_CURSOR_START, start | 14);
+            let end = crtc_read(CRTC_CURSOR_END) & 0xE0;
+            crtc_write(CRTC_CURSOR_END, end | 15);
+            self.cursor_enabled = true;
+        }
+        // After a full line the column is 80 until the next character wraps;
+        // keep the cursor on the last cell instead of off the screen.
+        let column = core::cmp::min(self.column_position, BUFFER_WIDTH - 1);
+        let position = (BUFFER_HEIGHT - 1) * BUFFER_WIDTH + column;
+        crtc_write(CRTC_CURSOR_LOW, (position & 0xFF) as u8);
+        crtc_write(CRTC_CURSOR_HIGH, (position >> 8) as u8);
+    }
+
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
             ascii_character: b' ',
@@ -105,13 +186,13 @@ impl Writer {
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
             match byte {
-                // printable ASCII byte or newline
-                0x20..=0x7e | b'\n' => self.write_byte(byte),
-                // not part of printable ASCII range
-                _ => self.write_byte(0xfe),
+                // printable ASCII, or a control byte the writer understands
+                0x20..=0x7e | b'\n' | b'\r' | 0x08 | 0x0c => self.put_byte(byte),
+                // anything else shows as a block
+                _ => self.put_byte(0xfe),
             }
-
         }
+        self.update_cursor();
     }
 
 }
@@ -131,6 +212,7 @@ pub fn print_something() {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        cursor_enabled: false,
     };
 
     writer.write_byte(b'H');
@@ -146,6 +228,7 @@ lazy_static! {
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+        cursor_enabled: false,
     });
 }
 

@@ -13,9 +13,10 @@ use crate::syscall::uaccess::{
     canonical_user_addr, copy_c_string_from_user, copy_from_user, copy_to_user,
     validate_user_range,
 };
-use crate::fs::{with_vfs, FileType, OpenFlags, Path, SeekWhence};
+use crate::fs::{with_vfs, FileType, FsError, InodeRef, OpenFlags, Path, SeekWhence};
 use alloc::vec::Vec;
 use x86_64::structures::paging::PageTableFlags;
+use x86_64::VirtAddr;
 
 const PATH_MAX: usize = 4096;
 
@@ -61,6 +62,7 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
         SYS_MUNMAP => ret(sys_munmap_syscall(pid, args[0], args[1])),
         SYS_SCHED_YIELD => ret(sys_yield()),
         SYS_SLEEP_TICKS => ret(sys_sleep_ticks(args[0])),
+        SYS_TTY_MODE => ret(sys_tty_mode(pid, args[0], args[1])),
         SYS_GETPID => pid.0,
         SYS_GETTID => tid.0,
         SYS_MKDIR => ret(sys_mkdir(pid, args[0], args[1])),
@@ -137,6 +139,13 @@ fn sys_close(pid: PID, fd: u64) -> Result<u64, SysError> {
     Ok(0)
 }
 
+/// `read(fd, buf, len)`.
+///
+/// Regular files are read in 512-byte chunks while holding PROCESS_MANAGER
+/// (the fd's offset lives in the fd table). Device fds (the console) are
+/// different, because `tty::read` can block for as long as nobody types.
+/// That lock keeps interrupts off, so blocking while holding it would
+/// deadlock the scheduler. See `read_device`.
 fn sys_read(
     pid: PID,
     fd: u64,
@@ -149,6 +158,27 @@ fn sys_read(
 
     let size = usize_from_u64(len)?;
     let src = validate_user_range(user_ptr, size)?;
+
+    let device = {
+        let mut pm = PROCESS_MANAGER.lock();
+        let file = pm
+            .process_mut(pid)
+            .file_mut(fd)
+            .map_err(SysError::from_fs_error)?;
+        let inode = file.inode();
+        if inode.file_type() == FileType::Device {
+            // Same check (and errno) as `File::read`, which this path skips.
+            if !file.flags().can_read() {
+                return Err(SysError::from_fs_error(FsError::ReadOnly));
+            }
+            Some(inode)
+        } else {
+            None
+        }
+    };
+    if let Some(inode) = device {
+        return read_device(pid, inode, src, size);
+    }
 
     let mut total = 0usize;
     let mut addr = src;
@@ -180,6 +210,28 @@ fn sys_read(
     }
 
     Ok(total as u64)
+}
+
+/// Read from a device with no locks held: the caller has already released
+/// PROCESS_MANAGER and kept only the inode. Devices have no file offset.
+///
+/// Exactly one `read_at` (of at most 512 bytes). A terminal returns as soon
+/// as *some* input is there (a line, or raw bytes). Looping for more, the way
+/// the regular-file path does after a full chunk, would block again even
+/// though bytes were already returned.
+fn read_device(
+    pid: PID,
+    inode: InodeRef,
+    destination: VirtAddr,
+    size: usize,
+) -> Result<u64, SysError> {
+    let mut buffer = [0u8; 512];
+    let chunk = core::cmp::min(buffer.len(), size);
+    let n = inode
+        .read_at(0, &mut buffer[..chunk])
+        .map_err(SysError::from_fs_error)?;
+    copy_to_user(pid, destination, &buffer[..n])?;
+    Ok(n as u64)
 }
 
 fn sys_write(
@@ -221,6 +273,23 @@ fn sys_write(
     }
 
     Ok(total as u64)
+}
+
+/// `tty_mode(fd, mode)`: switch the console between cooked (0) and raw (1)
+/// and return the previous mode. `ENOTTY` if `fd` is not the console.
+fn sys_tty_mode(pid: PID, fd: u64, raw_mode: u64) -> Result<u64, SysError> {
+    let is_terminal = PROCESS_MANAGER
+        .lock()
+        .process_mut(pid)
+        .file_mut(fd)
+        .map_err(SysError::from_fs_error)?
+        .inode()
+        .is_terminal();
+    if !is_terminal {
+        return Err(SysError::Enotty);
+    }
+    let mode = crate::tty::TtyMode::from_raw(raw_mode).ok_or(SysError::Einval)?;
+    Ok(crate::tty::set_mode(mode).as_raw())
 }
 
 fn sys_lseek(

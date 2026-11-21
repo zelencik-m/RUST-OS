@@ -12,12 +12,14 @@ pub mod scheduler;
 pub mod sync;
 pub mod syscall;
 pub mod fs;
+pub mod keyboard;
+pub mod tty;
 
 extern crate alloc;
 
 use interrupts::{gdt};
 use crate::task::executor::Executor;
-use crate::task::{Task, keyboard};
+use crate::task::Task;
 use crate::process::process_manager::PROCESS_MANAGER;
 use crate::memory::memory_manager::{MemoryManager, MEMORY_MANAGER};
 use bootloader::BootInfo;
@@ -60,6 +62,11 @@ pub fn init(boot_info: &'static BootInfo) {
     process_manager::create_thread(kpid, kernel_init_thread);
 
     process_manager::create_idle_thread(crate::process::idle::idle_loop);
+
+    // Keep the run queue from growing (allocating) inside interrupt handlers.
+    crate::scheduler::scheduler::SCHEDULER
+        .lock()
+        .reserve_queue_capacity(64);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +97,6 @@ extern "C" fn kernel_init_thread() -> ! {
     
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
-    executor.spawn(Task::new(keyboard::print_keypresses()));
     
     executor.run();
 }

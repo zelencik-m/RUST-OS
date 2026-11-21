@@ -14,7 +14,7 @@ use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 use rust_os::fs::{ramfs::RamFs, File, FileSystem, InodeRef, OpenFlags, Vfs, VFS};
 use rust_os::process::process_manager::{self, PROCESS_MANAGER};
-use rust_os::process::thread::TID;
+use rust_os::process::thread::{ThreadState, TID};
 use rust_os::process::PID;
 use rust_os::scheduler::scheduler::SCHEDULER;
 use rust_os::sync::IrqSafeMutex;
@@ -51,6 +51,7 @@ elf!(FS_TREE, "fs_tree_test");
 elf!(RING3_EXCEPTION, "ring3_exception_test");
 elf!(NX_EXEC, "nx_exec_test");
 elf!(FS_OPS, "fs_ops_test");
+elf!(TTY_TEST, "tty_test");
 
 #[derive(Clone)]
 struct UserCase {
@@ -62,12 +63,17 @@ struct UserCase {
     /// Keep this case off the run queue until the named case has finished.
     /// Use it for programs that would race another one on the shared RamFs.
     start_after: Option<&'static str>,
+    /// Keys to type on the console once this case's thread blocks (in a
+    /// `read(0)`). Typed once.
+    input: Option<&'static str>,
 }
 
 struct RunnerState {
     cases: Vec<UserCase>,
     /// `(tid, dependency)` for deferred cases that have not been started yet.
     deferred: Vec<(TID, &'static str)>,
+    /// `(tid, keys)` for cases whose input has not been typed yet.
+    pending_input: Vec<(TID, &'static str)>,
 }
 
 static RUNNER: IrqSafeMutex<Option<RunnerState>> = IrqSafeMutex::new(None);
@@ -180,6 +186,29 @@ extern "C" fn user_monitor() -> ! {
             });
         });
 
+        // Type pending input for programs now blocked in read(0). The keys
+        // are pushed after every lock is dropped: push_key takes the TTY,
+        // SCHEDULER and PROCESS_MANAGER locks itself.
+        let mut to_type: Vec<&'static str> = Vec::new();
+        interrupts::without_interrupts(|| {
+            let mut state = RUNNER.lock();
+            let state = state.as_mut().expect("userspace monitor state missing");
+            let pm = PROCESS_MANAGER.lock();
+            state.pending_input.retain(|&(tid, keys)| {
+                let blocked =
+                    pm.thread_exists(tid) && pm.get_thread_state(tid) == ThreadState::Blocked;
+                if blocked {
+                    to_type.push(keys);
+                }
+                !blocked
+            });
+        });
+        for keys in to_type {
+            for c in keys.chars() {
+                rust_os::tty::push_key(pc_keyboard::DecodedKey::Unicode(c));
+            }
+        }
+
         if finished {
             for case in &cases {
                 support::report_pass(case.name);
@@ -218,6 +247,7 @@ fn add_case(name: &'static str, image: &[u8], marker: &'static str, root: &Inode
         stderr,
         success_marker: marker,
         start_after: None,
+        input: None,
     }
 }
 
@@ -263,6 +293,10 @@ fn run_user_elf_smoke_programs() {
     let mut fs_ops = add_case("fs_ops_test", &FS_OPS.0, "fs_ops_test: passed", &root);
     fs_ops.start_after = Some("fs_tree_test");
     cases.push(fs_ops);
+    // Types its stdin once it blocks in read(0): a line, then Ctrl-D (EOF).
+    let mut tty_case = add_case("tty_test", &TTY_TEST.0, "tty_test: passed", &root);
+    tty_case.input = Some("hello\n\u{4}");
+    cases.push(tty_case);
     cases.push(add_case(
         "ring3_exception_test",
         &RING3_EXCEPTION.0,
@@ -286,6 +320,10 @@ fn run_user_elf_smoke_programs() {
         deferred: cases
             .iter()
             .filter_map(|case| case.start_after.map(|after| (case.tid, after)))
+            .collect(),
+        pending_input: cases
+            .iter()
+            .filter_map(|case| case.input.map(|keys| (case.tid, keys)))
             .collect(),
     });
     {

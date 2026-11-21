@@ -1,14 +1,4 @@
-/*
- * Phase 1 ring-3 test: getcwd, chdir, unlink and rmdir through int 0x80.
- *
- * Runs against the RamFs that tests/userspace.rs installs as the VFS root.
- * Every failure is reported on stderr (fd 2), which makes the runner fail the
- * suite. The final "passed" line goes to stdout.
- *
- * The order is deliberate. getcwd, unlink and rmdir with absolute paths come
- * first, and chdir last. While Phase 1 is in progress, the first missing
- * piece is the one that fails.
- */
+
 #include "syscalls.h"
 
 enum {

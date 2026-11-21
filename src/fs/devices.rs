@@ -20,9 +20,10 @@ impl Inode for ConsoleInode {
         FileType::Device
     }
 
-    fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<usize, FsError> {
+    fn read_at(&self, _offset: u64, buf: &mut [u8]) -> Result<usize, FsError> {
         match self.kind {
-            ConsoleKind::Stdin => Ok(0),
+            // Blocks until the keyboard has produced input.
+            ConsoleKind::Stdin => Ok(crate::tty::read(buf)),
             ConsoleKind::Stdout | ConsoleKind::Stderr => Err(FsError::ReadOnly),
         }
     }
@@ -64,6 +65,10 @@ impl Inode for ConsoleInode {
 
     fn len(&self) -> Result<u64, FsError> {
         Ok(0)
+    }
+
+    fn is_terminal(&self) -> bool {
+        true
     }
 
     fn stat(&self) -> Result<FileStat, FsError> {

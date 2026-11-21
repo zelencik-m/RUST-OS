@@ -62,6 +62,10 @@ fn embedded_user_programs_are_x86_64_elfs() {
             "fs_ops_test",
             include_bytes!(concat!(env!("OUT_DIR"), "/fs_ops_test.elf")) as &[u8],
         ),
+        (
+            "tty_test",
+            include_bytes!(concat!(env!("OUT_DIR"), "/tty_test.elf")) as &[u8],
+        ),
     ] {
         assert_x86_64_elf(name, image);
     }

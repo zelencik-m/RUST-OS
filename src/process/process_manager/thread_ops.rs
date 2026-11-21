@@ -93,7 +93,7 @@ impl ProcessManager {
         }
     }
 
-    fn thread_exists(&self, tid: TID) -> bool {
+    pub fn thread_exists(&self, tid: TID) -> bool {
         self.threads
             .get(tid.0 as usize)
             .map(|slot| slot.is_some())

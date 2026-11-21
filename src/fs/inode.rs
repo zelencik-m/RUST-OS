@@ -67,6 +67,12 @@ pub trait Inode: Send + Sync {
         Err(FsError::NotDirectory)
     }
 
+    /// Whether this is the console terminal (Linux `isatty`). Terminal
+    /// controls such as `SYS_TTY_MODE` return `ENOTTY` for everything else.
+    fn is_terminal(&self) -> bool {
+        false
+    }
+
     fn stat(&self) -> Result<FileStat, FsError> {
         Ok(FileStat {
             size: self.len()?,

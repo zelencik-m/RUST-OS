@@ -70,6 +70,23 @@ impl Scheduler {
         self.runnables.contains(&tid)
     }
 
+    /// Whether any thread is queued to run (the idle thread is never queued).
+    pub fn has_runnable(&self) -> bool {
+        !self.runnables.is_empty()
+    }
+
+    /// Pre-allocate room for `additional` more queued threads.
+    ///
+    /// Interrupt handlers (the timer's requeue, the keyboard waking readers)
+    /// push onto the run queue. Growing it there would allocate inside an
+    /// interrupt, and the heap allocator's lock is not IRQ-safe: if the
+    /// interrupted code was in the middle of an allocation, that deadlocks.
+    /// A `VecDeque` never shrinks, so reserving once at boot keeps those
+    /// pushes allocation-free as long as fewer threads are queued.
+    pub fn reserve_queue_capacity(&mut self, additional: usize) {
+        self.runnables.reserve(additional);
+    }
+
     /// Drop every queued runnable thread. Used by test kernels that replace
     /// the boot-time threads with their own.
     pub fn clear_runnables(&mut self) {
@@ -144,7 +161,7 @@ pub fn schedule() {
     interrupts::without_interrupts(schedule_with_interrupts_disabled);
 }
 
-fn schedule_with_interrupts_disabled() {
+pub(crate) fn schedule_with_interrupts_disabled() {
     debug_assert!(!interrupts::are_enabled());
     let mut scheduler = SCHEDULER.lock();
     let next = scheduler.requeue_and_pick_next();

@@ -11,6 +11,25 @@ lazy_static! {
     };
 }
 
+/// Writes bytes to the port unchanged.
+///
+/// `SerialPort`'s own `fmt::Write` goes through `send`, which expands every
+/// backspace (0x08) and DEL (0x7F) into "back, space, back". That's an erase,
+/// not a cursor move. The TTY and the line editor already send their own
+/// `\x08 \x08` when they mean "erase", and a bare `\x08` when they mean
+/// "move left", so serial output must pass bytes through as-is, just like
+/// the VGA writer does.
+struct RawSerial<'a>(&'a mut SerialPort);
+
+impl fmt::Write for RawSerial<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            self.0.send_raw(byte);
+        }
+        Ok(())
+    }
+}
+
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
@@ -38,8 +57,7 @@ pub fn _print(args: fmt::Arguments) {
             false
         };
 
-        SERIAL1
-            .lock()
+        RawSerial(&mut SERIAL1.lock())
             .write_fmt(args)
             .expect("serial output failed");
 

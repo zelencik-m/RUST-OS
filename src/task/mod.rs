@@ -2,7 +2,6 @@ use core::{future::Future, pin::Pin};
 use alloc::boxed::Box;
 
 pub mod simple_executor;
-pub mod keyboard;
 pub mod executor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
