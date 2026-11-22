@@ -74,6 +74,22 @@ fn embedded_user_programs_are_x86_64_elfs() {
             "spawn_test",
             include_bytes!(concat!(env!("OUT_DIR"), "/spawn_test.elf")) as &[u8],
         ),
+        (
+            "ulib_test",
+            include_bytes!(concat!(env!("OUT_DIR"), "/ulib_test.elf")) as &[u8],
+        ),
+        (
+            "hello",
+            include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf")) as &[u8],
+        ),
+        (
+            "thread_b",
+            include_bytes!(concat!(env!("OUT_DIR"), "/thread_b.elf")) as &[u8],
+        ),
+        (
+            "thread_c",
+            include_bytes!(concat!(env!("OUT_DIR"), "/thread_c.elf")) as &[u8],
+        ),
     ] {
         assert_x86_64_elf(name, image);
     }

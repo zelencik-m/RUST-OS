@@ -6,6 +6,7 @@ use crate::process::process_manager::{
     PROCESS_MANAGER,
 };
 use crate::process::thread::TID;
+use crate::programs::{self, LoadError};
 use crate::process::PID;
 use crate::scheduler::scheduler::SCHEDULER;
 use crate::syscall::errors::SysError;
@@ -22,10 +23,6 @@ use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
 const PATH_MAX: usize = 4096;
-
-/// Largest program file `spawn` loads. Programs are read whole into the
-/// kernel heap (10 MiB) before they are loaded.
-const MAX_PROGRAM_SIZE: u64 = 4 * 1024 * 1024;
 
 #[no_mangle]
 extern "C" fn syscall_int_handler(frame: &mut SyscallFrame) {
@@ -355,7 +352,12 @@ fn sys_spawn(pid: PID, user_path: u64, user_argv: u64) -> Result<u64, SysError> 
     let args = copy_argv_from_user(pid, user_argv)?;
     let cwd = process_cwd(pid);
     let path = Path::resolve(&cwd, &raw_path).map_err(SysError::from_fs_error)?;
-    let elf = read_program(&path)?;
+    let elf = programs::load(&path).map_err(|error| match error {
+        LoadError::Fs(error) => SysError::from_fs_error(error),
+        LoadError::NotRegular => SysError::Eacces,
+        LoadError::TooLarge => SysError::Enomem,
+        LoadError::NotElf => SysError::Enoexec,
+    })?;
 
     let stdio = {
         let pm = PROCESS_MANAGER.lock();
@@ -406,46 +408,6 @@ fn copy_argv_from_user(pid: PID, user_argv: u64) -> Result<Vec<String>, SysError
         }
         args.push(copy_c_string_from_user(pid, pointer, PATH_MAX)?);
     }
-}
-
-/// Read a whole program file for `spawn`, checking that it is a regular
-/// file and an x86_64 ELF.
-fn read_program(path: &Path) -> Result<Vec<u8>, SysError> {
-    let root = Path::root();
-    // The outer Result is the VFS's, the inner one is spawn's own checks.
-    let bytes = with_vfs(|vfs| -> Result<Result<Vec<u8>, SysError>, FsError> {
-        let stat = vfs.stat(&root, path.as_str())?;
-        if stat.file_type != FileType::Regular {
-            return Ok(Err(SysError::Eacces));
-        }
-        if stat.size > MAX_PROGRAM_SIZE {
-            return Ok(Err(SysError::Enomem));
-        }
-        let mut file = vfs.open(&root, path.as_str(), OpenFlags::read_only())?;
-        let mut bytes = alloc::vec![0u8; stat.size as usize];
-        let mut filled = 0;
-        while filled < bytes.len() {
-            let n = file.read(&mut bytes[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        bytes.truncate(filled);
-        Ok(Ok(bytes))
-    })
-    .map_err(SysError::from_fs_error)??;
-
-    // e_ident: magic, ELFCLASS64, little-endian; e_machine: x86_64.
-    let is_x86_64_elf = bytes.len() >= 20
-        && bytes[..4] == *b"\x7fELF"
-        && bytes[4] == 2
-        && bytes[5] == 1
-        && u16::from_le_bytes([bytes[18], bytes[19]]) == 0x3e;
-    if !is_x86_64_elf {
-        return Err(SysError::Enoexec);
-    }
-    Ok(bytes)
 }
 
 /// `wait4(pid, status, options, rusage)`: wait for child `pid` to exit,

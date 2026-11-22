@@ -22,10 +22,25 @@ macro_rules! embedded_elf {
 
 embedded_elf!(THREAD_B, "thread_b.elf");
 embedded_elf!(THREAD_C, "thread_c.elf");
+embedded_elf!(HELLO, "hello.elf");
+
+/// Installed to `/bin/<name>` at every boot (see `rust_os::programs`).
+fn installed_programs() -> [(&'static str, &'static [u8]); 3] {
+    [
+        ("hello", &HELLO.0),
+        ("thread_b", &THREAD_B.0),
+        ("thread_c", &THREAD_C.0),
+    ]
+}
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rust_os::debug::set_enabled(true);
     rust_os::init(boot_info);
+
+    // Rewritten on every boot, so the copies on the persistent disk image
+    // always match this build.
+    rust_os::programs::install(&installed_programs()).expect("failed to install programs in /bin");
+    debugln!(">>> installed {} programs in {}", installed_programs().len(), rust_os::programs::BIN_DIR);
 
     interrupts::without_interrupts(|| {
         launch_user_program("thread_b", &THREAD_B.0);

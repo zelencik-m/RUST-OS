@@ -14,6 +14,7 @@ use crate::debugln;
 use crate::memory::address_space::AddressSpace;
 use crate::memory::memory_manager::{FaultAction, MemoryManager, MEMORY_MANAGER, Oom};
 use crate::memory::vma::VmaKind;
+use crate::fs::devices::{stderr_file, stdin_file, stdout_file};
 use crate::fs::{File, Path};
 use crate::process::elf_loader::load_elf;
 use crate::process::initial_stack::{layout_initial_stack, ArgsTooLarge};
@@ -163,23 +164,24 @@ pub fn create_user_process(name: String) -> Result<PID, Oom> {
     Ok(PROCESS_MANAGER.lock().create_user_process_with_space(PID(0), name, space))
 }
 
-/// Create a user process, load an ELF image into its private address space,
-/// and enqueue a user thread at the ELF entry point.
+/// Start a kernel-owned (parent PID 0) user process from an ELF image, with
+/// argv `[name]`, cwd `/` and the console as fds 0–2. Its thread is
+/// enqueued.
+///
+/// The argv matters even for programs that ignore it: a ulib program's
+/// crt0 reads `argc` from the initial stack.
 pub fn spawn_elf(name: String, elf_bytes: &[u8]) -> Result<(PID, TID), Oom> {
-    let pid = create_user_process(name)?;
-
-    let entry_point = {
-        with_space_and_mm(pid, |space, mm| load_elf(elf_bytes, space, mm))
-            .expect("new user process has no address space")
-    };
-
-    match entry_point.and_then(|entry_point| create_user_thread(pid, entry_point)) {
-        Ok(tid) => Ok((pid, tid)),
-        Err(error) => {
-            destroy_process(pid);
-            Err(error)
-        }
-    }
+    let argv = [name.as_str()];
+    spawn_process(SpawnArgs {
+        parent: PID(0),
+        name: name.clone(),
+        elf: elf_bytes,
+        argv: &argv,
+        cwd: Path::root(),
+        stdio: [Some(stdin_file()), Some(stdout_file()), Some(stderr_file())],
+    })
+    // A single argv entry only fails to fit if `name` is over ~16 KiB.
+    .map_err(|_| Oom)
 }
 
 /// Everything a new user process starts with.

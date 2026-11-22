@@ -12,8 +12,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use rust_os::fs::{ramfs::RamFs, File, FileSystem, InodeRef, OpenFlags, Vfs, VFS};
-use rust_os::process::process_manager::{self, PROCESS_MANAGER};
+use rust_os::fs::devices::stdin_file;
+use rust_os::fs::{ramfs::RamFs, File, FileSystem, InodeRef, OpenFlags, Path, Vfs, VFS};
+use rust_os::process::process_manager::{self, SpawnArgs, PROCESS_MANAGER};
 use rust_os::process::thread::{ThreadState, TID};
 use rust_os::process::PID;
 use rust_os::scheduler::scheduler::SCHEDULER;
@@ -54,6 +55,8 @@ elf!(FS_OPS, "fs_ops_test");
 elf!(TTY_TEST, "tty_test");
 elf!(SPAWN_TEST, "spawn_test");
 elf!(PROC_CHILD, "proc_child");
+elf!(ULIB_TEST, "ulib_test");
+elf!(HELLO, "hello");
 
 #[derive(Clone)]
 struct UserCase {
@@ -222,8 +225,18 @@ extern "C" fn user_monitor() -> ! {
 }
 
 fn add_case(name: &'static str, image: &[u8], marker: &'static str, root: &InodeRef) -> UserCase {
-    let (pid, tid) = process_manager::spawn_elf(String::from(name), image)
-        .unwrap_or_else(|_| panic!("failed to load user ELF {}", name));
+    add_case_with_argv(name, image, &[name], marker, root)
+}
+
+/// Start `image` (kernel-parented, cwd `/`) with this argv, the console as
+/// stdin, and stdout/stderr captured in `/<name>.stdout` and `.stderr`.
+fn add_case_with_argv(
+    name: &'static str,
+    image: &[u8],
+    argv: &[&str],
+    marker: &'static str,
+    root: &InodeRef,
+) -> UserCase {
     let stdout: InodeRef = root
         .create_child(
             &alloc::format!("{name}.stdout"),
@@ -236,12 +249,19 @@ fn add_case(name: &'static str, image: &[u8], marker: &'static str, root: &Inode
             rust_os::fs::FileType::Regular,
         )
         .unwrap();
-    {
-        let mut pm = PROCESS_MANAGER.lock();
-        let process = pm.process_mut(pid);
-        process.fd_table[1] = Some(File::new(stdout.clone(), OpenFlags::write_only()).unwrap());
-        process.fd_table[2] = Some(File::new(stderr.clone(), OpenFlags::write_only()).unwrap());
-    }
+    let (_, tid) = process_manager::spawn_process(SpawnArgs {
+        parent: PID(0),
+        name: String::from(name),
+        elf: image,
+        argv,
+        cwd: Path::root(),
+        stdio: [
+            Some(stdin_file()),
+            Some(File::new(stdout.clone(), OpenFlags::write_only()).unwrap()),
+            Some(File::new(stderr.clone(), OpenFlags::write_only()).unwrap()),
+        ],
+    })
+    .unwrap_or_else(|_| panic!("failed to load user ELF {}", name));
     UserCase {
         name,
         tid,
@@ -269,14 +289,16 @@ fn run_user_elf_smoke_programs() {
     let capture_fs = Arc::new(RamFs::new());
     let root = capture_fs.root();
     *VFS.lock() = Some(Vfs::new(capture_fs));
-    // spawn_test starts /bin/proc_child.
+    // spawn_test starts /bin/proc_child, and ulib_test starts itself.
     let bin = root
         .create_child("bin", rust_os::fs::FileType::Directory)
         .unwrap();
-    bin.create_child("proc_child", rust_os::fs::FileType::Regular)
-        .unwrap()
-        .write_at(0, &PROC_CHILD.0)
-        .unwrap();
+    for (name, image) in [("proc_child", &PROC_CHILD.0[..]), ("ulib_test", &ULIB_TEST.0[..])] {
+        bin.create_child(name, rust_os::fs::FileType::Regular)
+            .unwrap()
+            .write_at(0, image)
+            .unwrap();
+    }
 
     let mut cases = Vec::new();
     cases.push(add_case(
@@ -320,6 +342,19 @@ fn run_user_elf_smoke_programs() {
     spawn_case.start_after = Some("tty_test");
     spawn_case.input = Some("\u{3}");
     cases.push(spawn_case);
+    // Creates and removes /ulib_test.out, so it starts after the two
+    // programs that walk and change the tree.
+    let mut ulib_case = add_case("ulib_test", &ULIB_TEST.0, "ulib_test: passed\n", &root);
+    ulib_case.start_after = Some("fs_ops_test");
+    cases.push(ulib_case);
+    // The whole output: crt0 passes argc/argv to main.
+    cases.push(add_case_with_argv(
+        "hello",
+        &HELLO.0,
+        &["hello", "a", "b"],
+        "hello: argc=3 a b\n",
+        &root,
+    ));
     cases.push(add_case(
         "ring3_exception_test",
         &RING3_EXCEPTION.0,

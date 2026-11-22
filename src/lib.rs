@@ -14,6 +14,7 @@ pub mod syscall;
 pub mod fs;
 pub mod keyboard;
 pub mod tty;
+pub mod programs;
 
 extern crate alloc;
 
