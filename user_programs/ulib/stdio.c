@@ -124,6 +124,15 @@ static void format(struct out *o, const char *f, va_list args) {
             }
         }
         int width = 0;
+        if (*f == '*') {
+            /* The width is the next argument; negative means left-justify. */
+            width = va_arg(args, int);
+            if (width < 0) {
+                left = 1;
+                width = -width;
+            }
+            f++;
+        }
         while (*f >= '0' && *f <= '9') {
             width = width * 10 + (*f - '0');
             f++;

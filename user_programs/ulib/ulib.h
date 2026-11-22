@@ -143,7 +143,8 @@ const char *strerror(int error);
 /* ---- stdio.c ---------------------------------------------------------- */
 
 /* Formats: %d %i %u %x %X %c %s %p %%, the length modifiers l/ll/z (64-bit),
- * a field width, '-' (left-justify) and '0' (zero-pad). No floating point.
+ * a field width (digits, or '*' to take it from the arguments), '-'
+ * (left-justify) and '0' (zero-pad). No floating point.
  * printf/dprintf return the number of bytes written, or a negative errno. */
 int vsnprintf(char *buffer, size_t size, const char *format, va_list args);
 int snprintf(char *buffer, size_t size, const char *format, ...)

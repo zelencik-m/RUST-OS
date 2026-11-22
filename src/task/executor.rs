@@ -60,14 +60,15 @@ impl Executor {
         }
     }
 
+    /// With nothing to run, give the CPU away for a tick.
+    ///
+    /// This runs on a scheduled kernel thread, so it must not idle with
+    /// `hlt`: that keeps the CPU for the rest of the time slice, and every
+    /// thread that wakes up meanwhile (the shell after a key press) waits
+    /// for it. A task woken in the meantime runs on the next tick.
     fn sleep_if_idle(&self) {
-        use x86_64::instructions::interrupts::{self, enable_and_hlt};
-
-        interrupts::disable();
         if self.task_queue.is_empty() {
-            enable_and_hlt();
-        } else {
-            interrupts::enable();
+            crate::scheduler::scheduler::sleep(1);
         }
     }
 }

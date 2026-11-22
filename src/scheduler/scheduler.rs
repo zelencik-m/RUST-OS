@@ -1,6 +1,6 @@
 use alloc::collections::{BinaryHeap, VecDeque};
 use core::cmp::Reverse;
-use crate::debugln;
+use crate::log_trace;
 use crate::process::thread::TID;
 use lazy_static::lazy_static;
 use crate::process::process_manager::{switch_to, PROCESS_MANAGER};
@@ -133,7 +133,7 @@ impl Scheduler {
         drop(pm);
 
         if self.runnables.is_empty() {
-            debugln!("No runnable threads, switching to idle thread");
+            log_trace!("no runnable threads, switching to the idle thread");
             return self.idle_thread;
         }
         self.next_runnable()
@@ -143,6 +143,7 @@ impl Scheduler {
     /// has expired and the caller should reschedule.
     pub fn tick(&mut self) -> bool {
         self.tick_count = self.tick_count.wrapping_add(1);
+        crate::debug::record_tick();
         self.tick_count % TIME_SLICE == 0
     }
 }
@@ -166,8 +167,7 @@ pub(crate) fn schedule_with_interrupts_disabled() {
     let mut scheduler = SCHEDULER.lock();
     let next = scheduler.requeue_and_pick_next();
     if let Some(tid) = next {
-        debugln!("Switching to thread {:?}", tid);
-        debugln!("Queue: {:?}", scheduler.runnables);
+        log_trace!("switching to {:?}, queue {:?}", tid, scheduler.runnables);
         drop(scheduler); // release before touching PROCESS_MANAGER/switch_to
         switch_to(tid);
     }
@@ -189,7 +189,7 @@ pub fn sleep(ticks: u64) {
             let current_tid = scheduler
                 .get_current()
                 .expect("No current thread to sleep");
-            debugln!("Thread {:?} sleeping for {} ticks", current_tid, ticks);
+            log_trace!("{:?} sleeping for {} ticks", current_tid, ticks);
             let wakeup_tick = scheduler.tick_count.wrapping_add(ticks);
             scheduler.sleep_queue.push(Reverse(SleepEntry {
                 wakeup_tick,

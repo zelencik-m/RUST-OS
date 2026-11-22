@@ -96,10 +96,10 @@ extern "x86-interrupt" fn page_fault_handler(
             .lock()
             .get_current()
             .expect("user-mode page fault with no current thread");
-        crate::debugln!(
-            "PAGE FAULT: protection violation, killing TID({:?})\n  addr: {:?}\n  err:  {:?}",
-            tid,
+        crate::log_warn!(
+            "page fault (protection violation) at {:?}, killing {:?} (error {:?})",
             fault_addr,
+            tid,
             error_code
         );
         crate::process::process_manager::kill_current_thread_and_schedule(tid);
@@ -124,36 +124,37 @@ extern "x86-interrupt" fn page_fault_handler(
         }
 
         FaultAction::Guard => {
-            crate::debugln!(
-                "PAGE FAULT: stack overflow (guard page) PID({}), TID({:?})",
+            crate::log_warn!(
+                "stack overflow (guard page {:?}), killing PID({}) {:?}",
+                fault_addr,
                 owner.0,
                 tid
             );
-            crate::debugln!("  faulting addr: {:?}", fault_addr);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
 
         FaultAction::Segfault => {
-            crate::debugln!(
-                "PAGE FAULT: killing PID({}), TID({:?})",
+            crate::log_warn!(
+                "segmentation fault at {:?} (ip {:?}, error {:?}), killing PID({}) {:?}",
+                fault_addr,
+                stack_frame.instruction_pointer,
+                error_code,
                 owner.0,
                 tid
             );
-            crate::debugln!("  faulting addr: {:?}", fault_addr);
-            crate::debugln!("  error code:    {:?}", error_code);
-            crate::debugln!("{:#?}", stack_frame);
+            crate::log_debug!("{:#?}", stack_frame);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
 
         FaultAction::Oom => {
-            crate::debugln!(
-                "PAGE FAULT: OOM while mapping PID({}), TID({:?})",
+            crate::log_warn!(
+                "out of memory mapping {:?}, killing PID({}) {:?}",
+                fault_addr,
                 owner.0,
                 tid
             );
-            crate::debugln!("  faulting addr: {:?}", fault_addr);
 
             crate::process::process_manager::kill_current_thread_and_schedule(tid);
         }
@@ -277,10 +278,13 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         let tid = SCHEDULER.lock().get_current().expect("No current thread during #GP");
         let owner = PROCESS_MANAGER.lock().thread(tid).get_owner();
         
-        crate::debugln!("\n!!! EXCEPTION: GENERAL PROTECTION FAULT (#GP) in Ring 3 !!!");
-        crate::debugln!("  Killing PID({}), TID({:?})", owner.0, tid);
-        crate::debugln!("  Error Code: {:#x}", error_code);
-        crate::debugln!("  Instruction Pointer: {:?}", stack_frame.instruction_pointer);
+        crate::log_warn!(
+            "general protection fault (error {:#x}, ip {:?}), killing PID({}) {:?}",
+            error_code,
+            stack_frame.instruction_pointer,
+            owner.0,
+            tid
+        );
         
         crate::process::process_manager::kill_current_thread_and_schedule(tid);
     } else {

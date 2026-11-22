@@ -76,6 +76,15 @@ impl ProcessManager {
         pid
     }
 
+    /// How many user processes are running (exited zombies don't count).
+    pub fn live_user_process_count(&self) -> usize {
+        self.processes
+            .iter()
+            .flatten()
+            .filter(|process| process.is_user() && process.exit_code.is_none())
+            .count()
+    }
+
     /// Whether `pid` is a user process that hasn't exited, i.e. one that
     /// may still `wait4` for its children.
     pub fn is_live_user_process(&self, pid: PID) -> bool {

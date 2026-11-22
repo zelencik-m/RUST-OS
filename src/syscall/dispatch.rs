@@ -84,7 +84,7 @@ fn dispatch(pid: PID, tid: TID, frame: &SyscallFrame) -> u64 {
         SYS_CHDIR => ret(sys_chdir(pid, args[0])),
         SYS_GETDENTS64 => ret(sys_getdents64(pid, args[0], args[1], args[2])),
         _ => {
-            crate::debugln!("syscall: unknown syscall number {}", frame.rax);
+            crate::log_warn!("unknown syscall number {}", frame.rax);
             SysError::Enosys.to_errno()
         }
     }

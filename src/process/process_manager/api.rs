@@ -10,7 +10,7 @@ use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
-use crate::debugln;
+use crate::{log_debug, log_trace};
 use crate::memory::address_space::AddressSpace;
 use crate::memory::memory_manager::{FaultAction, MemoryManager, MEMORY_MANAGER, Oom};
 use crate::memory::vma::VmaKind;
@@ -100,7 +100,7 @@ pub fn switch_to(tid: TID) {
     let new_is_user = pm.thread(tid).is_user;
     let new_kernel_stack_top = pm.thread(tid).kernel_stack_top;
 
-    debugln!("Thread: {:?}, Process:{:?}", tid, new_owner);
+    log_trace!("switch_to {:?} of PID({})", tid, new_owner.0);
 
     let changing = scheduler
         .get_current()
@@ -115,17 +115,15 @@ pub fn switch_to(tid: TID) {
 
     if changing {
         if let Some(space) = &pm.process(new_owner).address_space {
-            debugln!("[switch_to] switching to user CR3 for TID {:?}", tid);
             let (_, flags) = Cr3::read();
             unsafe { Cr3::write(space.cr3(), flags); }
-            debugln!("[switch_to] CR3 switch succeeded for TID {:?}", tid);
+            log_trace!("user address space of PID({}) active", new_owner.0);
         } else {
-            debugln!("[switch_to] switching to kernel CR3 for TID {:?}", tid);
             let mm_guard = MEMORY_MANAGER.lock();
             let mm = mm_guard.as_ref().expect("MemoryManager not initialized");
             let (_, flags) = Cr3::read();
             unsafe { Cr3::write(mm.kernel_p4_frame, flags); }
-            debugln!("[switch_to] kernel CR3 restored for TID {:?}", tid);
+            log_trace!("kernel address space active");
         }
     }
 
@@ -501,7 +499,7 @@ pub fn exit_current_thread(tid: TID, code: i32) -> ! {
     // thread's stack after its address space is gone. The next thread's
     // interrupt flag comes back from its saved RFLAGS in switch_context.
     x86_64::instructions::interrupts::disable();
-    debugln!("Killing thread {:?}", tid);
+    log_debug!("killing {:?}", tid);
     {
         let mut sched = SCHEDULER.lock();
         sched.remove_from_queues(tid);

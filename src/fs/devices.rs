@@ -33,16 +33,12 @@ impl Inode for ConsoleInode {
         match self.kind {
             ConsoleKind::Stdin => Err(FsError::ReadOnly),
             ConsoleKind::Stdout | ConsoleKind::Stderr => {
-                // Preserve sys_write's serial and VGA output behavior.
-                if let Ok(s) = core::str::from_utf8(buf) {
-                    crate::serial_print!("{}", s);
-                    crate::print!("{}", s);
-                } else {
-                    for &byte in buf {
-                        crate::serial_print!("{}", byte as char);
-                        crate::print!("{}", byte as char);
-                    }
-                }
+                // Raw bytes, not `&str`: a program's write can end in the
+                // middle of a UTF-8 character (printf flushes every 256
+                // bytes), and the next write brings the rest. Both outputs
+                // decode across writes.
+                crate::serial::write_bytes(buf);
+                crate::vga_buffer::write_bytes(buf);
                 Ok(buf.len())
             }
         }

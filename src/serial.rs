@@ -69,6 +69,17 @@ pub fn _print(args: fmt::Arguments) {
     });
 }
 
+/// Send raw bytes to the host (program output: possibly part of a UTF-8
+/// character, which the host terminal puts back together).
+pub fn write_bytes(bytes: &[u8]) {
+    crate::vga_buffer::with_kernel_page_tables(|| {
+        let mut port = SERIAL1.lock();
+        for &byte in bytes {
+            port.send_raw(byte);
+        }
+    });
+}
+
 /// Prints to the host through the serial interface.
 #[macro_export]
 macro_rules! serial_print {

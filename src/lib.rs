@@ -14,6 +14,9 @@ pub mod syscall;
 pub mod fs;
 pub mod keyboard;
 pub mod tty;
+pub mod boot_screen;
+pub mod status_bar;
+pub mod theme;
 pub mod programs;
 
 extern crate alloc;
@@ -23,13 +26,29 @@ use crate::task::executor::Executor;
 use crate::task::Task;
 use crate::process::process_manager::PROCESS_MANAGER;
 use crate::memory::memory_manager::{MemoryManager, MEMORY_MANAGER};
+use bootloader::bootinfo::MemoryRegionType;
 use bootloader::BootInfo;
+use core::fmt;
 use crate::process::process_manager;
 
+/// Initialize the kernel (silently). See [`init_with`].
 pub fn init(boot_info: &'static BootInfo) {
+    init_with(boot_info, &mut |_, _| {});
+}
+
+/// Initialize the kernel, calling `progress(step, detail)` after each step.
+/// `src/main.rs` shows the steps on the boot screen. The first calls come
+/// before the heap exists, so `progress` must not allocate.
+///
+/// Interrupts stay disabled; the caller enables them when it's ready.
+pub fn init_with(boot_info: &'static BootInfo, progress: &mut dyn FnMut(&str, fmt::Arguments)) {
     gdt::init();
     interrupts::init_idt();
+    progress("CPU tables", format_args!("GDT, TSS with fault stacks, IDT"));
+
     unsafe { interrupts::PICS.lock().initialize() };
+    progress("Interrupts", format_args!("8259 PIC: timer and keyboard IRQs"));
+
     unsafe {
         use x86_64::registers::control::Efer;
         use x86_64::registers::control::EferFlags;
@@ -37,8 +56,9 @@ pub fn init(boot_info: &'static BootInfo) {
         efer.insert(EferFlags::NO_EXECUTE_ENABLE);
         Efer::write(efer);
     }
+    progress("No-execute pages", format_args!("EFER.NXE"));
 
-    debugln!("{:?}", boot_info.physical_memory_offset);
+    log_debug!("physical memory offset {:#x}", boot_info.physical_memory_offset);
     let mut mm = unsafe {
         MemoryManager::new(boot_info.physical_memory_offset, &boot_info.memory_map)
     };
@@ -48,10 +68,30 @@ pub fn init(boot_info: &'static BootInfo) {
         core::sync::atomic::Ordering::Relaxed,
     );
 
+    let usable: u64 = boot_info
+        .memory_map
+        .iter()
+        .filter(|region| region.region_type == MemoryRegionType::Usable)
+        .map(|region| region.range.end_addr() - region.range.start_addr())
+        .sum();
+    progress("Memory", format_args!("{} MiB usable, 4-level paging", usable >> 20));
+
     mm.init_heap().expect("heap initialization failed");
     *MEMORY_MANAGER.lock() = Some(mm);
+    progress(
+        "Kernel heap",
+        format_args!("{} MiB buddy allocator", crate::memory::allocator::HEAP_SIZE >> 20),
+    );
 
-    crate::fs::init().expect("filesystem initialization failed");
+    let disk = crate::fs::init().expect("filesystem initialization failed");
+    progress(
+        "Root filesystem",
+        format_args!(
+            "ext2 on ATA disk, {} MiB, {} KiB blocks",
+            disk.size_bytes() >> 20,
+            disk.block_size / 1024
+        ),
+    );
     
     let mut pm = PROCESS_MANAGER.lock();
     
@@ -68,6 +108,7 @@ pub fn init(boot_info: &'static BootInfo) {
     crate::scheduler::scheduler::SCHEDULER
         .lock()
         .reserve_queue_capacity(64);
+    progress("Scheduler", format_args!("kernel process, idle thread, preemption"));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +134,8 @@ pub fn hlt_loop() -> ! {
 }
 
 extern "C" fn kernel_init_thread() -> ! {
-    println!("Kernel init thread started. Running Async Executor...");
-    
+    log_debug!("kernel init thread started, running the async executor");
+
     
     let mut executor = Executor::new();
     executor.spawn(Task::new(example_task()));
@@ -108,5 +149,5 @@ async fn async_number() -> u32 {
 
 async fn example_task() {
     let number = async_number().await;
-    println!("async number: {}", number);
+    log_debug!("async example task: number {}", number);
 }

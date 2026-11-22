@@ -20,7 +20,7 @@ pub use path::Path;
 pub use vfs::{with_vfs, Vfs, VFS};
 pub use block_device::BlockDevice;
 pub use ata_pio::AtaPioDisk;
-pub use ext2::Ext2Fs;
+pub use ext2::{Ext2Fs, Ext2Geometry};
 
 use alloc::sync::Arc;
 
@@ -28,10 +28,11 @@ use alloc::sync::Arc;
 ///
 /// The filesystem image is on the secondary ATA master, separate from the
 /// boot medium.
-pub fn init() -> Result<(), FsError> {
+pub fn init() -> Result<Ext2Geometry, FsError> {
     let device = Arc::new(AtaPioDisk::secondary_master());
     let ext2 = Ext2Fs::mount(device)?;
+    let geometry = ext2.geometry();
     let vfs = Vfs::new(ext2);
     *VFS.lock() = Some(vfs);
-    Ok(())
+    Ok(geometry)
 }

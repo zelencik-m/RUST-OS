@@ -83,8 +83,8 @@ impl Ext2Fs {
             return Err(FsError::Io);
         }
 
-        crate::debugln!(
-            "[ext2] mounted: block_size={}, blocks={}, inodes={}, groups={}",
+        crate::log_info!(
+            "mounted: {}-byte blocks, {} blocks, {} inodes, {} groups",
             state.block_size(),
             state.superblock.blocks_count,
             state.superblock.inodes_count,
@@ -124,6 +124,21 @@ pub struct Ext2Usage {
     pub group_free_inodes: u32,
     /// Sum of `bg_used_dirs_count` over all groups.
     pub used_dirs: u32,
+}
+
+/// Size and layout of a mounted ext2 filesystem (from the superblock).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ext2Geometry {
+    pub block_size: u32,
+    pub blocks: u32,
+    pub inodes: u32,
+    pub groups: u32,
+}
+
+impl Ext2Geometry {
+    pub fn size_bytes(&self) -> u64 {
+        self.block_size as u64 * self.blocks as u64
+    }
 }
 
 /// Read-only inspection helpers for tests and diagnostics.
@@ -180,6 +195,16 @@ impl Ext2Fs {
     /// Superblock `s_inodes_count`.
     pub fn inodes_count(&self) -> u32 {
         self.state.superblock.inodes_count
+    }
+
+    /// Size and layout of the mounted filesystem.
+    pub fn geometry(&self) -> Ext2Geometry {
+        Ext2Geometry {
+            block_size: self.state.block_size() as u32,
+            blocks: self.state.superblock.blocks_count,
+            inodes: self.state.superblock.inodes_count,
+            groups: self.state.groups.len() as u32,
+        }
     }
 }
 

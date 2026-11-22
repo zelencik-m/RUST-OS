@@ -3,7 +3,6 @@ use alloc::alloc::{GlobalAlloc, Layout};
 use super::{Locked, align_up};
 use core::{ptr::null_mut};
 
-use super::super::super::{println, print};
 
 struct ListNode {
     next: Option<&'static mut ListNode>,
@@ -40,8 +39,7 @@ impl BuddyAllocator{
         self.heap_start = heap_start;
         self.heap_size = heap_size;
 
-        println!("Heap start (raw): {:#x}", heap_start);
-        println!("Heap size (raw):  {} bytes", heap_size);
+        crate::log_debug!("heap at {:#x}, {} bytes", heap_start, heap_size);
 
         if heap_size == 0 {
             panic!("Heap size cannot be zero");
@@ -79,8 +77,8 @@ impl BuddyAllocator{
                 None => panic!("Block size {} out of bounds", block_size),
             };
 
-            println!(
-                "Adding free block at {:#x}, size {} (order {})",
+            crate::log_trace!(
+                "free block at {:#x}, size {} (order {})",
                 current, block_size, order
             );
 
@@ -228,44 +226,34 @@ impl BuddyAllocator {
         }
     }
 
+    /// Log how many free blocks each order has (debug level).
     fn print_free_lists(&self) {
-        println!("========== Buddy Allocator Free Lists ==========");
-        println!("Heap: start={:#x}, size={} bytes", self.heap_start, self.heap_size);
-        
-        let mut total_blocks = 0;
-        
+        if !crate::debug::enabled(crate::debug::Level::Debug) {
+            return;
+        }
         for order in 0..NUM_ORDERS {
-            let block_size = self.order_to_size(order);
             let mut count = 0;
-            
             // Inspect the list without taking ownership of its nodes.
             let mut current: *const ListNode = match self.free_lists[order].as_ref() {
                 Some(node) => *node as *const ListNode,
                 None => core::ptr::null(),
             };
-            
-            if !current.is_null() {
-                print!("Order {:2} (size={:8} bytes): ", order, block_size);
-                
-                while !current.is_null() {
-                    count += 1;
-                    print!("{:#x} ", current as usize);
-                    current = match unsafe { (*current).next.as_ref() } {
-                        Some(node) => *node as *const ListNode,
-                        None => core::ptr::null(),
-                    };
-                }
-                
-                println!("({} blocks)", count);
-                total_blocks += count;
+            while !current.is_null() {
+                count += 1;
+                current = match unsafe { (*current).next.as_ref() } {
+                    Some(node) => *node as *const ListNode,
+                    None => core::ptr::null(),
+                };
+            }
+            if count > 0 {
+                crate::log_debug!(
+                    "free list order {:2} ({:8} bytes): {} blocks",
+                    order,
+                    self.order_to_size(order),
+                    count
+                );
             }
         }
-        
-        if total_blocks == 0 {
-            println!("No free blocks available.");
-        }
-        
-        println!("================================================");
     }
 
 }

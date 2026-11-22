@@ -551,8 +551,6 @@ pub fn echo(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
-    if let Ok(text) = core::str::from_utf8(bytes) {
-        crate::serial_print!("{}", text);
-        crate::print!("{}", text);
-    }
+    crate::serial::write_bytes(bytes);
+    crate::vga_buffer::write_bytes(bytes);
 }

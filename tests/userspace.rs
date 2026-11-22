@@ -117,14 +117,26 @@ const SH_KEYS: &str = concat!(
     "exit\n",
 );
 
+/// The interactive shell's prompt at `/`: the cwd in teal (bright blue),
+/// then a green `►`.
+macro_rules! sh_prompt {
+    () => {
+        "\x1b[1;34m/\x1b[0m \x1b[1;32m\u{25ba}\x1b[0m "
+    };
+}
+
 /// What `sh_interactive` must print. The editor redraws the row as
-/// `\r prompt line` and moves back to the cursor with `\b`.
+/// `\r prompt line ESC[K` (erase the rest of the row) and moves back to
+/// the cursor with `\b`.
 const SH_INTERACTIVE_OUTPUT: &[&str] = &[
-    "rust-os shell - type 'help'\n/$ ",
+    // The banner box (its title has one color per letter), then the first
+    // prompt.
+    "\u{250c}\u{2500}[ \x1b[1;97mR\x1b[1;96mU\x1b[1;96mS\x1b[1;94mT",
+    concat!("\u{2518}\x1b[0m\n\n", sh_prompt!()),
     // After inserting 'c': cursor at 2 of 7, so 5 x \b. Then Enter.
-    "\r/$ echo hi\x08\x08\x08\x08\x08\nhi\n",
+    concat!("\r", sh_prompt!(), "echo hi\x1b[K\x08\x08\x08\x08\x08\nhi\n"),
     // The history line, cursor at its end.
-    "\r/$ echo hi\nhi\n",
+    concat!("\r", sh_prompt!(), "echo hi\x1b[K\nhi\n"),
     "hello: argc=2 z\n",
 ];
 

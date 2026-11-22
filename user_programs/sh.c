@@ -13,6 +13,10 @@
  * edits lines itself. Otherwise it fails with ENOTTY, and the shell reads
  * commands from stdin with no prompt and no echo (tests use this).
  *
+ * Interactive mode uses ANSI colors and box drawing (the console maps the
+ * colors to its palette, src/theme.rs, and the UTF-8 box characters to the
+ * VGA font); script mode prints plain text.
+ *
  * There is no malloc: every buffer is on the stack or static.
  */
 #include "ulib.h"
@@ -30,8 +34,121 @@ enum {
 static int exit_requested;
 static int exit_status;
 
+/* Status of the last command (builtin or program); colors the prompt. */
+static int last_status;
+
+/* ---- colors ------------------------------------------------------------ */
+
+/* ANSI colors, named for what they look like with the console's palette
+ * (src/theme.rs): mint ("green"), cyan accent ("blue"), amber ("yellow"). */
+#define RESET "\x1b[0m"
+#define RED "\x1b[1;31m"
+#define GREEN "\x1b[1;32m"
+#define AMBER "\x1b[1;33m"
+#define TEAL "\x1b[1;34m"
+#define PALE "\x1b[1;36m"
+#define DIM "\x1b[90m"
+#define MID "\x1b[32m"
+
+/* The prompt's arrow (►) and a separator dot (·), as UTF-8. */
+#define ARROW "\u25BA"
+#define DOT "\u00B7"
+#define RULE "\u2500" /* ─ */
+
+/* Clear the screen and go to the top-left. */
+#define CLEAR_SCREEN "\x1b[2J\x1b[H"
+
+static int use_color; /* interactive mode only */
+
+/* `code` in interactive mode, "" in script mode. */
+static const char *paint(const char *code) {
+    return use_color ? code : "";
+}
+
+/* Columns `text` takes on screen: escape sequences take none, and a UTF-8
+ * character takes one. */
+static size_t visible_width(const char *text) {
+    size_t width = 0;
+    for (const char *p = text; *p != '\0'; p++) {
+        if (*p == '\x1b') {
+            while (*p != '\0' && !(*p >= '@' && *p <= '~' && *p != '[')) {
+                p++;
+            }
+            if (*p == '\0') {
+                break;
+            }
+            continue;
+        }
+        if (((unsigned char)*p & 0xc0) != 0x80) {
+            width++;
+        }
+    }
+    return width;
+}
+
+/* `count` horizontal rules (─) into `out`, which must hold 3 * count + 1. */
+static void rule(char *out, size_t count) {
+    out[0] = '\0';
+    for (size_t i = 0; i < count; i++) {
+        strcat(out, RULE);
+    }
+}
+
+/* `count` rules (─) whose color fades through `steps` (ANSI color codes,
+ * bright first), in equal parts. Plain rules in script mode. `out` must
+ * hold 3 * count + 8 * steps + 1 bytes. */
+static void fading_rule(char *out, size_t count, const char *const *steps, size_t step_count) {
+    out[0] = '\0';
+    size_t current = step_count;
+    for (size_t i = 0; i < count; i++) {
+        size_t step = i * step_count / count;
+        if (use_color && step != current) {
+            strcat(out, steps[step]);
+            current = step;
+        }
+        strcat(out, RULE);
+    }
+}
+
+/* Fades for rules: down to the frame color (to meet a box corner), or on
+ * into the background (the console's two darkest gradient shades). */
+static const char *const FADE_TO_FRAME[] = {"\x1b[94m", "\x1b[36m", "\x1b[90m"};
+static const char *const FADE_OUT[] = {"\x1b[94m", "\x1b[36m", "\x1b[90m", "\x1b[95m", "\x1b[35m"};
+
+/* "RUST-OS" with one color per letter, white to cyan. */
+static void gradient_title(char *out, size_t capacity) {
+    static const char *const shades[] = {"\x1b[1;97m", "\x1b[1;96m", "\x1b[1;96m", "\x1b[1;94m",
+                                         "\x1b[1;94m", "\x1b[36m",   "\x1b[36m"};
+    const char *title = "RUST-OS";
+    size_t n = 0;
+    out[0] = '\0';
+    for (size_t i = 0; title[i] != '\0' && n + 12 < capacity; i++) {
+        n += (size_t)snprintf(out + n, capacity - n, "%s%c", paint(shades[i]), title[i]);
+    }
+}
+
+/* A section heading: "─[ TITLE ]────..." `width` columns wide, the rule
+ * fading out. */
+static void print_section(const char *title, size_t width) {
+    char line[3 * SCREEN_WIDTH + 64];
+    size_t used = 1 + 2 + strlen(title) + 2;
+    fading_rule(line, used < width ? width - used : 0, FADE_OUT, 5);
+    printf("%s" RULE "[ %s%s%s ]%s%s\n", paint(DIM), paint(GREEN), title, paint(DIM), line,
+           paint(RESET));
+}
+
+/* An error message on stderr (red in interactive mode), with a newline. */
+__attribute__((format(printf, 1, 2))) static void shell_error(const char *format, ...) {
+    char message[LINE_CAP];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    dprintf(STDERR_FILENO, "%s%s%s\n", paint(RED), message, paint(RESET));
+}
+
 static void report(const char *command, const char *what, int error) {
-    dprintf(STDERR_FILENO, "%s: %s: %s\n", command, what, strerror(error));
+    shell_error("%s: %s: %s", command, what, strerror(error));
 }
 
 /* ======================================================================
@@ -119,38 +236,37 @@ static void history_add(const char *line) {
  * ====================================================================== */
 
 struct editor {
-    const char *prompt;
-    size_t prompt_length;
+    const char *prompt;   /* may contain color codes */
+    size_t prompt_length; /* bytes */
+    size_t prompt_width;  /* columns it takes on screen */
     char *buffer;
     size_t length; /* characters in buffer */
     size_t cursor; /* 0..length */
     size_t max;    /* longest line that fits on the screen row */
-    size_t shown;  /* characters of the line currently on screen */
 };
 
+#define ERASE_TO_END "\x1b[K"
+
 /* Redraw the whole row in one write:
- *   "\r" prompt line, spaces over leftovers from a longer line, then "\b"
- *   back to the cursor.
- * The terminal only understands \r (column 0) and \b (one left, no erase),
- * which is why the line has to stay on one row (see `max`). */
+ *   "\r" prompt line, erase the rest of the row (leftovers of a longer
+ *   line), then "\b" back to the cursor.
+ * \r and \b only move within the row, which is why the line has to stay on
+ * one row (see `max`). */
 static void redraw(struct editor *e) {
-    char out[4 * SCREEN_WIDTH];
+    char out[5 * SCREEN_WIDTH];
     size_t n = 0;
-    size_t pad = e->shown > e->length ? e->shown - e->length : 0;
 
     out[n++] = '\r';
     memcpy(out + n, e->prompt, e->prompt_length);
     n += e->prompt_length;
     memcpy(out + n, e->buffer, e->length);
     n += e->length;
-    for (size_t i = 0; i < pad; i++) {
-        out[n++] = ' ';
-    }
-    for (size_t i = 0; i < e->length + pad - e->cursor; i++) {
+    memcpy(out + n, ERASE_TO_END, sizeof(ERASE_TO_END) - 1);
+    n += sizeof(ERASE_TO_END) - 1;
+    for (size_t i = 0; i < e->length - e->cursor; i++) {
         out[n++] = '\b';
     }
     write(STDOUT_FILENO, out, n);
-    e->shown = e->length;
 }
 
 static void load_line(struct editor *e, const char *text) {
@@ -163,17 +279,18 @@ static void load_line(struct editor *e, const char *text) {
     e->cursor = n;
 }
 
-/* Read one line from the console in raw mode. Returns its length (the line
- * is NUL-terminated in `buffer`), or -1 if input ended. */
-static int edit_line(const char *prompt, char *buffer, size_t capacity) {
+/* Read one line from the console in raw mode. `prompt_width` is how many
+ * columns the prompt takes (its color codes take none). Returns the line's
+ * length (it is NUL-terminated in `buffer`), or -1 if input ended. */
+static int edit_line(const char *prompt, size_t prompt_width, char *buffer, size_t capacity) {
     struct editor e;
     e.prompt = prompt;
     e.prompt_length = strlen(prompt);
+    e.prompt_width = prompt_width;
     e.buffer = buffer;
     e.length = 0;
     e.cursor = 0;
-    e.shown = 0;
-    e.max = e.prompt_length + 1 < SCREEN_WIDTH ? SCREEN_WIDTH - 1 - e.prompt_length : 0;
+    e.max = prompt_width + 1 < SCREEN_WIDTH ? SCREEN_WIDTH - 1 - prompt_width : 0;
     if (e.max > capacity - 1) {
         e.max = capacity - 1;
     }
@@ -198,8 +315,7 @@ static int edit_line(const char *prompt, char *buffer, size_t capacity) {
             buffer[0] = '\0';
             return 0;
         } else if (key == 0x0c) { /* Ctrl-L: clear the screen */
-            write(STDOUT_FILENO, "\f", 1);
-            e.shown = 0;
+            write(STDOUT_FILENO, CLEAR_SCREEN, sizeof(CLEAR_SCREEN) - 1);
         } else if (key == 0x08 || key == 0x7f) { /* Backspace */
             if (e.cursor == 0) {
                 continue;
@@ -247,18 +363,24 @@ static int edit_line(const char *prompt, char *buffer, size_t capacity) {
     }
 }
 
-/* "cwd$ ", with a long cwd shortened to "...<end of it>". */
-static void make_prompt(char *prompt, size_t capacity) {
+/* "cwd ► " (cwd in teal, the arrow green, or red after a failed command),
+ * with a long cwd shortened to "...<end of it>". Returns the prompt's width
+ * in columns. */
+static size_t make_prompt(char *prompt, size_t capacity) {
     char cwd[PATH_CAP];
     if (getcwd(cwd, sizeof(cwd)) < 0) {
         strcpy(cwd, "?");
     }
     size_t length = strlen(cwd);
+    const char *shown = cwd;
+    const char *ellipsis = "";
     if (length > PROMPT_PATH_MAX) {
-        snprintf(prompt, capacity, "...%s$ ", cwd + length - (PROMPT_PATH_MAX - 3));
-    } else {
-        snprintf(prompt, capacity, "%s$ ", cwd);
+        shown = cwd + length - (PROMPT_PATH_MAX - 3);
+        ellipsis = "...";
     }
+    snprintf(prompt, capacity, "%s%s%s%s %s" ARROW "%s ", paint(TEAL), ellipsis, shown,
+             paint(RESET), paint(last_status == 0 ? GREEN : RED), paint(RESET));
+    return strlen(ellipsis) + strlen(shown) + 3;
 }
 
 /* ======================================================================
@@ -305,7 +427,7 @@ static int read_line(char *line, size_t capacity) {
         return -1;
     }
     if (too_long) {
-        dprintf(STDERR_FILENO, "sh: line too long (at most %d characters)\n", (int)capacity - 1);
+        shell_error("sh: line too long (at most %d characters)", (int)capacity - 1);
         n = 0;
     }
     line[n] = '\0';
@@ -337,7 +459,7 @@ static int tokenize(char *line, char **argv, int max) {
             break;
         }
         if (argc == max) {
-            dprintf(STDERR_FILENO, "sh: too many arguments (at most %d)\n", max);
+            shell_error("sh: too many arguments (at most %d)", max);
             return -1;
         }
         argv[argc++] = w;
@@ -346,7 +468,7 @@ static int tokenize(char *line, char **argv, int max) {
                 r++;
                 while (*r != '"') {
                     if (*r == '\0') {
-                        dprintf(STDERR_FILENO, "sh: unterminated quote\n");
+                        shell_error("sh: unterminated quote");
                         return -1;
                     }
                     *w++ = *r++;
@@ -372,7 +494,7 @@ static int tokenize(char *line, char **argv, int max) {
  * ====================================================================== */
 
 static int usage(const char *text) {
-    dprintf(STDERR_FILENO, "usage: %s\n", text);
+    shell_error("usage: %s", text);
     return 1;
 }
 
@@ -440,7 +562,9 @@ static int cmd_ls(int argc, char **argv) {
             if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
                 continue;
             }
-            printf("%s%s%s", printed ? "  " : "", entry->d_name, entry->d_type == DT_DIR ? "/" : "");
+            const char *color = entry->d_type == DT_DIR ? TEAL : entry->d_type == DT_CHR ? AMBER : "";
+            printf("%s%s%s%s%s", printed ? "  " : "", paint(color), entry->d_name,
+                   entry->d_type == DT_DIR ? "/" : "", paint(color[0] ? RESET : ""));
             printed = 1;
         }
     }
@@ -551,7 +675,7 @@ static int cmd_echo(int argc, char **argv) {
 static int cmd_clear(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    write(STDOUT_FILENO, "\f", 1);
+    write(STDOUT_FILENO, CLEAR_SCREEN, sizeof(CLEAR_SCREEN) - 1);
     return 0;
 }
 
@@ -670,7 +794,7 @@ static int cmd_rm(int argc, char **argv) {
     for (int i = first; i < argc; i++) {
         const char *path = argv[i];
         if (is_protected_path(path)) {
-            dprintf(STDERR_FILENO, "rm: %s: refusing to remove\n", path);
+            shell_error("rm: %s: refusing to remove", path);
             status = 1;
             continue;
         }
@@ -707,22 +831,23 @@ static int cmd_help(int argc, char **argv);
 struct builtin {
     const char *name;
     int (*run)(int argc, char **argv);
-    const char *summary;
+    const char *args;
+    const char *description;
 };
 
 static const struct builtin builtins[] = {
-    {"cd", cmd_cd, "cd [dir]         change directory (default /)"},
-    {"pwd", cmd_pwd, "pwd              print the working directory"},
-    {"ls", cmd_ls, "ls [path]        list a directory"},
-    {"mkdir", cmd_mkdir, "mkdir <dir>...   create directories"},
-    {"rmdir", cmd_rmdir, "rmdir <dir>...   remove empty directories"},
-    {"rm", cmd_rm, "rm [-r] <path>.. remove files (-r: directories too)"},
-    {"touch", cmd_touch, "touch <file>...  create empty files"},
-    {"cat", cmd_cat, "cat <file>...    print files"},
-    {"echo", cmd_echo, "echo [text]...   print the arguments"},
-    {"clear", cmd_clear, "clear            clear the screen (also Ctrl-L)"},
-    {"help", cmd_help, "help             this list"},
-    {"exit", cmd_exit, "exit [status]    leave the shell"},
+    {"cd", cmd_cd, "[dir]", "change directory (default /)"},
+    {"pwd", cmd_pwd, "", "print the working directory"},
+    {"ls", cmd_ls, "[path]", "list a directory"},
+    {"mkdir", cmd_mkdir, "<dir>...", "create directories"},
+    {"rmdir", cmd_rmdir, "<dir>...", "remove empty directories"},
+    {"rm", cmd_rm, "[-r] <path>...", "remove files (-r: directories too)"},
+    {"touch", cmd_touch, "<file>...", "create empty files"},
+    {"cat", cmd_cat, "<file>...", "print files"},
+    {"echo", cmd_echo, "[text]...", "print the arguments"},
+    {"clear", cmd_clear, "", "clear the screen (also Ctrl-L)"},
+    {"help", cmd_help, "", "show this help"},
+    {"exit", cmd_exit, "[status]", "leave the shell"},
 };
 
 enum { BUILTIN_COUNT = sizeof(builtins) / sizeof(builtins[0]) };
@@ -730,12 +855,22 @@ enum { BUILTIN_COUNT = sizeof(builtins) / sizeof(builtins[0]) };
 static int cmd_help(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    puts("Builtins:");
+    enum { WIDTH = 72 };
+    print_section("COMMANDS", WIDTH);
     for (int i = 0; i < BUILTIN_COUNT; i++) {
-        printf("  %s\n", builtins[i].summary);
+        printf("  %s%-6s%s %-15s %s%s%s\n", paint(TEAL), builtins[i].name, paint(RESET),
+               builtins[i].args, paint(MID), builtins[i].description, paint(RESET));
     }
-    puts("Anything else runs a program: NAME runs /bin/NAME, a path with '/' runs that file.");
-    puts("Keys: <- -> move, Up/Down history, Ctrl-C cancel (or stop the program), Ctrl-L clear.");
+    print_section("PROGRAMS", WIDTH);
+    printf("  %sNAME%s runs /bin/NAME %s" DOT "%s a path with '/' runs that file %s" DOT
+           "%s %sls /bin%s lists them\n",
+           paint(TEAL), paint(RESET), paint(DIM), paint(RESET), paint(DIM), paint(RESET),
+           paint(TEAL), paint(RESET));
+    print_section("KEYS", WIDTH);
+    printf("  %s\u2190 \u2192%s move   %s\u2191 \u2193%s history   %sCtrl-C%s cancel/stop   "
+           "%sCtrl-L%s clear\n",
+           paint(TEAL), paint(RESET), paint(TEAL), paint(RESET), paint(TEAL), paint(RESET),
+           paint(TEAL), paint(RESET));
     return 0;
 }
 
@@ -743,7 +878,7 @@ static int cmd_help(int argc, char **argv) {
 static int run_builtin(int argc, char **argv) {
     for (int i = 0; i < BUILTIN_COUNT; i++) {
         if (strcmp(argv[0], builtins[i].name) == 0) {
-            builtins[i].run(argc, argv);
+            last_status = builtins[i].run(argc, argv);
             return 1;
         }
     }
@@ -771,6 +906,7 @@ static void run_program(char **argv, int interactive) {
                            : snprintf(path, sizeof(path), "/bin/%s", name);
     if (needed >= (int)sizeof(path)) {
         report("sh", name, -ENAMETOOLONG);
+        last_status = 1;
         return;
     }
 
@@ -791,36 +927,79 @@ static void run_program(char **argv, int interactive) {
     }
 
     if (child == -ENOENT && !has_slash) {
-        dprintf(STDERR_FILENO, "sh: %s: command not found\n", name);
+        shell_error("sh: %s: command not found", name);
+        status = 127; /* like bash */
     } else if (child < 0) {
         report("sh", name, child);
+        status = 126;
     } else if (waited < 0) {
         report("sh", "wait4", waited);
+        status = 1;
     } else if (status != 0) {
-        printf("[exit %d]\n", status);
+        const char *meaning = status == EXIT_INTERRUPTED ? ": interrupted"
+                            : status == EXIT_FAULT       ? ": crashed (CPU exception)"
+                                                         : "";
+        printf("%s[exit %d%s]%s\n", paint(AMBER), status, meaning, paint(RESET));
     }
+    last_status = status;
 }
 
 /* ======================================================================
  * main
  * ====================================================================== */
 
+/* One row of the banner box: "│ " text, padded to `inner` columns, " │". */
+static void banner_row(const char *text, size_t inner) {
+    size_t width = visible_width(text);
+    printf("%s\u2502%s %s%*s %s\u2502%s\n", paint(DIM), paint(RESET), text,
+           (int)(width < inner ? inner - width : 0), "", paint(DIM), paint(RESET));
+}
+
+/* The welcome box, in the style of the boot screen:
+ *
+ *   ┌─[ RUST-OS ]──────────────────────────────────────────────────┐
+ *   │ SHELL    /BIN/SH · TTY0        TYPE 'help' FOR THE COMMANDS  │
+ *   │ SESSION  INTERACTIVE           CTRL-C STOPS · CTRL-L CLEARS  │
+ *   └──────────────────────────────────────────────────────────────┘
+ */
+static void print_banner(void) {
+    enum { INNER = 64 };
+    char line[3 * (INNER + 2) + 64];
+    char row[LINE_CAP];
+    char title[128];
+
+    gradient_title(title, sizeof(title));
+    fading_rule(line, INNER + 2 - 1 - 11, FADE_TO_FRAME, 3);
+    printf("%s\u250C" RULE "[ %s%s ]%s%s\u2510%s\n", paint(DIM), title, paint(DIM), line,
+           paint(DIM), paint(RESET));
+    snprintf(row, sizeof(row), "%sSHELL%s    /BIN/SH %s" DOT "%s TTY0        %sTYPE %s'help'%s FOR THE COMMANDS%s",
+             paint(DIM), paint(RESET), paint(DIM), paint(RESET), paint(MID), paint(TEAL),
+             paint(MID), paint(RESET));
+    banner_row(row, INNER);
+    snprintf(row, sizeof(row), "%sSESSION%s  INTERACTIVE           %sCTRL-C STOPS " DOT " CTRL-L CLEARS%s",
+             paint(DIM), paint(RESET), paint(MID), paint(RESET));
+    banner_row(row, INNER);
+    rule(line, INNER + 2);
+    printf("%s\u2514%s\u2518%s\n\n", paint(DIM), line, paint(RESET));
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
     int interactive = tty_mode(STDIN_FILENO, TTY_RAW) >= 0;
+    use_color = interactive;
     if (interactive) {
-        puts("rust-os shell - type 'help'");
+        print_banner();
     }
 
     char line[LINE_CAP];
     char *args[MAX_TOKENS + 1];
-    char prompt[PROMPT_PATH_MAX + 8];
+    char prompt[PROMPT_PATH_MAX + 64]; /* the path plus color codes */
     while (!exit_requested) {
         int n;
         if (interactive) {
-            make_prompt(prompt, sizeof(prompt));
-            n = edit_line(prompt, line, sizeof(line));
+            size_t width = make_prompt(prompt, sizeof(prompt));
+            n = edit_line(prompt, width, line, sizeof(line));
         } else {
             n = read_line(line, sizeof(line));
         }

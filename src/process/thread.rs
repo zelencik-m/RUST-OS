@@ -1,7 +1,6 @@
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::alloc::Layout;
 use core::arch::global_asm;
-use crate::debug;
 use x86_64::VirtAddr;
 use crate::process::usermode::user_thread_trampoline;
 
@@ -72,7 +71,7 @@ impl Thread {
         let raw = unsafe { alloc_zeroed(layout) };
         assert!(!raw.is_null(), "thread stack allocation failed");
 
-        debug!("Thread stack allocated at {:p} with size {}", raw, stack_size);
+        crate::log_trace!("kernel stack at {:p}, {} bytes", raw, stack_size);
 
         let stack_top = (raw as u64 + stack_size as u64) & !0xF;
         let entry_addr = entry as usize as u64;

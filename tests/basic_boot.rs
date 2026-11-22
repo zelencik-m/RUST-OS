@@ -28,17 +28,18 @@ fn test_println() {
 fn test_vga_buffer_content() {
     const MARKER: &[u8] = b"vga-buffer-test-marker";
 
-    // Reset the column, write the marker, and inspect the scrolled row while
-    // holding the shared writer lock so earlier output cannot affect the test.
+    // Write the marker on a fresh line and read it back from the row the
+    // writer is on, while holding the writer lock so other output can't
+    // interfere.
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut writer = rust_os::vga_buffer::WRITER.lock();
         writer.write_string("\n");
-        writer.write_string("vga-buffer-test-marker\n");
-        let screen = 0xb8000 as *const u8;
+        let (row, _) = writer.position();
+        writer.write_string("vga-buffer-test-marker");
         for (column, expected) in MARKER.iter().enumerate() {
-            let actual = unsafe { core::ptr::read_volatile(screen.add((23 * 80 + column) * 2)) };
             assert_eq!(
-                actual, *expected,
+                writer.char_at(row, column),
+                *expected,
                 "VGA character mismatch at column {}",
                 column
             );
@@ -49,5 +50,95 @@ fn test_vga_buffer_content() {
 #[test_case]
 fn debug_logging_is_disabled_in_tests() {
     assert!(!rust_os::debug::is_enabled());
+    assert_eq!(rust_os::debug::level(), None);
 }
+
+#[test_case]
+fn log_levels_filter_by_verbosity() {
+    use rust_os::debug::{enabled, set_level, Level};
+    set_level(Some(Level::Info));
+    let checks = [
+        enabled(Level::Error),
+        enabled(Level::Warn),
+        enabled(Level::Info),
+        !enabled(Level::Debug),
+        !enabled(Level::Trace),
+    ];
+    set_level(Some(Level::Trace));
+    let all = enabled(Level::Trace);
+    set_level(None);
+    assert!(checks.iter().all(|&ok| ok), "Info enables Error..Info only: {:?}", checks);
+    assert!(all, "Trace enables everything");
+    assert!(!enabled(Level::Error), "None disables everything");
+}
+
+/// Whether the screen shows `expected` at `row`, `column`.
+fn screen_has_at(row: usize, column: usize, expected: &[u8]) -> bool {
+    let writer = rust_os::vga_buffer::WRITER.lock();
+    expected
+        .iter()
+        .enumerate()
+        .all(|(i, &byte)| writer.char_at(row, column + i) == byte)
+}
+
+/// Whether `expected` appears anywhere on the screen.
+fn screen_contains(expected: &[u8]) -> bool {
+    (0..25).any(|row| (0..=80 - expected.len()).any(|column| screen_has_at(row, column, expected)))
+}
+
+/// The boot screen draws with fixed cells; its frames can be drawn without
+/// the timer.
+#[test_case]
+fn boot_screen_shows_steps_and_the_final_frame() {
+    use rust_os::boot_screen;
+    boot_screen::begin();
+    boot_screen::step("First step", format_args!("detail {}", 42));
+    boot_screen::step("Second step", format_args!("more"));
+
+    assert!(screen_contains(b"HOBBY OPERATING SYSTEM"), "the tagline");
+    // Step lines from row 14: a check mark, then upper-case name and detail.
+    assert!(screen_has_at(14, 10, &[0xfe]), "the line marker (■)");
+    assert!(screen_has_at(14, 13, b"FIRST STEP"));
+    assert!(screen_has_at(14, 33, b"DETAIL 42"));
+    assert!(screen_has_at(15, 13, b"SECOND STEP"));
+    {
+        let writer = rust_os::vga_buffer::WRITER.lock();
+        let (older, _) = writer.color_at(14, 13);
+        let (newer, _) = writer.color_at(15, 13);
+        assert!(newer > older, "older lines fade (gradient slots {} vs {})", older, newer);
+    }
+
+    boot_screen::draw_frame(0, boot_screen::ANIMATION_FRAMES);
+    assert!(screen_contains(b"STARTING /BIN/SH"));
+    assert!(screen_contains(b"  0%"), "the bar starts empty");
+    assert!(!screen_contains(&[0xdb; 4]), "the logo hasn't appeared yet");
+
+    boot_screen::draw_frame(boot_screen::ANIMATION_FRAMES, boot_screen::ANIMATION_FRAMES);
+    assert!(screen_contains(b"100%"), "the progress bar reaches 100%");
+    assert!(screen_contains(b"SYSTEM READY"), "the last step line");
+    // The top row of the logo starts with R's four lit pixels (8 cells).
+    assert!(screen_contains(&[0xdb; 8]), "the logo is fully drawn");
+
+    boot_screen::finish();
+    let writer = rust_os::vga_buffer::WRITER.lock();
+    assert_eq!(writer.position(), (0, 0), "finish leaves a clear console");
+    assert_eq!(writer.char_at(14, 13), b' ');
+}
+
+#[test_case]
+fn logo_fits_on_the_screen() {
+    assert!(rust_os::boot_screen::LOGO_WIDTH <= 78);
+}
+
+#[test_case]
+fn status_bar_shows_uptime_and_processes() {
+    {
+        let mut writer = rust_os::vga_buffer::WRITER.lock();
+        rust_os::status_bar::draw(&mut writer, 3_723_000, 2, true);
+    }
+    assert!(screen_has_at(0, 1, b"RUST-OS"));
+    assert!(screen_contains(b"PROCS 02"));
+    assert!(screen_contains(b"UPTIME 01:02:03"), "3723 s is 1 h 2 min 3 s");
+}
+
 mod support;

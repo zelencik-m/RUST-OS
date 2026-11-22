@@ -12,7 +12,8 @@ use rust_os::process::process_manager::{self, SpawnArgs, PROCESS_MANAGER};
 use rust_os::process::{CHILD_EXITS, PID};
 use rust_os::programs;
 use rust_os::scheduler::scheduler::sleep;
-use rust_os::{debugln, hlt_loop, println, serial_println};
+use rust_os::debug::Level;
+use rust_os::{boot_screen, hlt_loop, log_info, println, serial_println, status_bar, theme};
 use x86_64::instructions::interrupts;
 
 entry_point!(kernel_main);
@@ -49,19 +50,26 @@ const SHELL_PATH: &str = "/bin/sh";
 /// right away doesn't take over the CPU.
 const RESTART_DELAY_TICKS: u64 = 9;
 
-/// Kernel debug logging (`debugln!`, serial only). Off by default: it logs
-/// every context switch, which buries the shell's output in the serial
-/// terminal that `cargo run` shows. Turn it on to debug the kernel.
-const DEBUG_LOG: bool = false;
+/// The kernel log level for a normal boot (serial only; see
+/// `rust_os::debug`). `Info` gives the boot steps, the shell starting, and
+/// warnings such as a program being killed. `Debug` adds per-subsystem
+/// details; `Trace` logs every context switch, which floods the serial copy
+/// of the shell's output. `None` turns logging off.
+const LOG_LEVEL: Option<Level> = Some(Level::Info);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
-    rust_os::debug::set_enabled(DEBUG_LOG);
-    rust_os::init(boot_info);
+    rust_os::debug::set_level(LOG_LEVEL);
+    boot_screen::begin();
+    rust_os::init_with(boot_info, &mut |step, detail| boot_screen::step(step, detail));
 
     // Rewritten on every boot, so the copies on the persistent disk image
     // always match this build.
-    rust_os::programs::install(&installed_programs()).expect("failed to install programs in /bin");
-    debugln!(">>> installed {} programs in {}", installed_programs().len(), rust_os::programs::BIN_DIR);
+    let installed = installed_programs();
+    programs::install(&installed).expect("failed to install programs in /bin");
+    boot_screen::step(
+        "Programs",
+        format_args!("{} installed in {}", installed.len(), programs::BIN_DIR),
+    );
 
     process_manager::create_thread(PID(0), shell_supervisor);
 
@@ -73,11 +81,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 /// exits, then start a new one.
 extern "C" fn shell_supervisor() -> ! {
     let path = Path::new_absolute(SHELL_PATH).expect("SHELL_PATH is absolute");
+    // Needs the timer, so it runs here rather than in kernel_main.
+    boot_screen::animate();
+    boot_screen::finish();
+    theme::apply();
+    status_bar::install();
+    process_manager::create_thread(PID(0), status_bar::run);
     loop {
         let pid = start_shell(&path);
-        debugln!(">>> started {} as PID({})", SHELL_PATH, pid.0);
+        log_info!("started {} as PID({})", SHELL_PATH, pid.0);
         wait_for_exit(pid);
-        println!("[shell exited; starting a new one]");
+        log_info!("{} exited, restarting it", SHELL_PATH);
+        println!("\n\x1b[33m[shell exited; starting a new one]\x1b[0m");
         sleep(RESTART_DELAY_TICKS);
     }
 }
@@ -124,5 +139,6 @@ fn panic(info: &PanicInfo) -> ! {
     interrupts::without_interrupts(|| {
         serial_println!("{}", info);
     });
+    rust_os::vga_buffer::print_panic(info);
     hlt_loop();
 }

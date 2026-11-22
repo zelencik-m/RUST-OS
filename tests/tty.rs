@@ -401,16 +401,18 @@ fn cell(row: usize, col: usize) -> u8 {
     unsafe { core::ptr::read_volatile(screen.add((row * COLS + col) * 2)) }
 }
 
-fn bottom_row(len: usize) -> Vec<u8> {
-    (0..len).map(|col| cell(ROWS - 1, col)).collect()
+/// The first `len` characters of the row the writer is on.
+fn current_row(w: &rust_os::vga_buffer::Writer, len: usize) -> Vec<u8> {
+    let (row, _) = w.position();
+    (0..len).map(|col| cell(row, col)).collect()
 }
 
 /// Run `f` with exclusive access to the VGA writer, starting from a fresh
-/// line.
+/// line with default colors.
 fn with_writer(f: impl FnOnce(&mut rust_os::vga_buffer::Writer)) {
     x86_64::instructions::interrupts::without_interrupts(|| {
         let mut writer = rust_os::vga_buffer::WRITER.lock();
-        writer.write_string("\n");
+        writer.write_string("\x1b[0m\n");
         f(&mut writer);
     });
 }
@@ -419,7 +421,7 @@ fn with_writer(f: impl FnOnce(&mut rust_os::vga_buffer::Writer)) {
 fn vga_carriage_return_goes_to_column_zero() {
     with_writer(|w| {
         w.write_string("abc\rX");
-        assert_eq!(bottom_row(3), b"Xbc");
+        assert_eq!(current_row(w, 3), b"Xbc");
     });
 }
 
@@ -427,20 +429,20 @@ fn vga_carriage_return_goes_to_column_zero() {
 fn vga_backspace_moves_left_without_erasing() {
     with_writer(|w| {
         w.write_string("ab\x08");
-        assert_eq!(bottom_row(2), b"ab", "backspace alone doesn't erase");
+        assert_eq!(current_row(w, 2), b"ab", "backspace alone doesn't erase");
         w.write_string("c");
-        assert_eq!(bottom_row(2), b"ac");
+        assert_eq!(current_row(w, 2), b"ac");
         // The line editor's erase sequence.
         w.write_string("\x08 \x08");
-        assert_eq!(bottom_row(2), b"a ");
+        assert_eq!(current_row(w, 2), b"a ");
         // Backspace at column 0 is a no-op.
         w.write_string("\r\x08Z");
-        assert_eq!(bottom_row(1), b"Z");
+        assert_eq!(current_row(w, 1), b"Z");
     });
 }
 
 #[test_case]
-fn vga_form_feed_clears_the_screen() {
+fn vga_form_feed_clears_the_screen_and_homes() {
     with_writer(|w| {
         w.write_string("junk\nmore junk");
         w.write_string("\x0c");
@@ -449,16 +451,33 @@ fn vga_form_feed_clears_the_screen() {
                 assert_eq!(cell(row, col), b' ', "cell {},{} not cleared", row, col);
             }
         }
-        w.write_string("top");
-        assert_eq!(bottom_row(3), b"top", "writing restarts at column 0");
+        assert_eq!(w.position(), (0, 0), "after a clear, text starts at the top");
+        w.write_string("top\nnext");
+        assert_eq!(cell(0, 0), b't');
+        assert_eq!(cell(1, 0), b'n', "rows fill downward");
+    });
+}
+
+#[test_case]
+fn vga_scrolls_only_at_the_bottom() {
+    with_writer(|w| {
+        w.write_string("\x0c");
+        for i in 0..ROWS {
+            w.write_string(if i == 0 { "first" } else { "\nline" });
+        }
+        assert_eq!(w.position().0, ROWS - 1);
+        assert_eq!(cell(0, 0), b'f', "a full screen hasn't scrolled yet");
+        w.write_string("\nlast");
+        assert_eq!(cell(0, 0), b'l', "one more line scrolls the first one away");
+        assert_eq!(current_row(w, 4), b"last");
     });
 }
 
 #[test_case]
 fn vga_hardware_cursor_follows_the_text() {
     use rust_os::vga_buffer::hardware_cursor;
-    let base = (ROWS - 1) * COLS;
     with_writer(|w| {
+        let base = w.position().0 * COLS;
         assert_eq!(hardware_cursor(), base);
         w.write_string("hello");
         assert_eq!(hardware_cursor(), base + 5);
@@ -469,6 +488,149 @@ fn vga_hardware_cursor_follows_the_text() {
         w.write_byte(b'x');
         assert_eq!(hardware_cursor(), base + 1, "write_byte moves it too");
     });
+}
+
+/// VGA color numbers (foreground, background).
+const LIGHT_GRAY: u8 = 7;
+const BLACK: u8 = 0;
+
+#[test_case]
+fn vga_ansi_colors() {
+    with_writer(|w| {
+        let row = w.position().0;
+        w.write_string("a\x1b[31mb\x1b[1;34mc\x1b[0md\x1b[97;41me\x1b[39;49mf\x1b[92mg\x1b[mh");
+        assert_eq!(current_row(w, 8), b"abcdefgh", "escape sequences print nothing");
+        assert_eq!(w.color_at(row, 0), (LIGHT_GRAY, BLACK), "default colors");
+        assert_eq!(w.color_at(row, 1), (4, BLACK), "31: red");
+        assert_eq!(w.color_at(row, 2), (9, BLACK), "1;34: bold blue is light blue");
+        assert_eq!(w.color_at(row, 3), (LIGHT_GRAY, BLACK), "0: reset");
+        assert_eq!(w.color_at(row, 4), (15, 4), "97;41: white on red");
+        assert_eq!(w.color_at(row, 5), (LIGHT_GRAY, BLACK), "39;49: default colors");
+        assert_eq!(w.color_at(row, 6), (10, BLACK), "92: light green");
+        assert_eq!(w.color_at(row, 7), (LIGHT_GRAY, BLACK), "ESC[m: reset");
+    });
+}
+
+#[test_case]
+fn vga_escape_split_across_writes() {
+    with_writer(|w| {
+        let row = w.position().0;
+        for piece in ["x\x1b", "[", "3", "2", "m", "y\x1b[0m"] {
+            w.write_string(piece);
+        }
+        assert_eq!(current_row(w, 2), b"xy");
+        assert_eq!(w.color_at(row, 1), (2, BLACK), "32: green");
+    });
+}
+
+#[test_case]
+fn vga_erase_and_cursor_sequences() {
+    with_writer(|w| {
+        w.write_string("abcdef\r\x1b[2C\x1b[K");
+        assert_eq!(current_row(w, 6), b"ab    ", "ESC[2C moves right, ESC[K erases the rest");
+        w.write_string("\x1b[D!");
+        assert_eq!(current_row(w, 2), b"a!", "ESC[D moves left");
+        w.write_string("\x1b[2J");
+        assert_eq!(w.position(), (0, 0), "ESC[2J clears and homes");
+        w.write_string("\x1b[3;5HX");
+        assert_eq!(cell(2, 4), b'X', "ESC[row;colH is 1-based");
+        w.write_string("\x1b[?25l\x1b[Zok");
+        assert_eq!(cell(2, 5), b'o', "unknown sequences are swallowed");
+    });
+}
+
+#[test_case]
+fn vga_utf8_maps_to_the_vga_font() {
+    with_writer(|w| {
+        // Box drawing, shades, an arrow, an accented letter, the middle dot.
+        w.write_string("\u{250c}\u{2500}\u{2510}\u{2502}\u{2591}\u{2593}\u{2588}\u{25ba}\u{e9}\u{b7}");
+        assert_eq!(
+            current_row(w, 10),
+            [0xda, 0xc4, 0xbf, 0xb3, 0xb0, 0xb2, 0xdb, 0x10, 0x82, 0xfa]
+        );
+    });
+}
+
+#[test_case]
+fn vga_unknown_and_broken_utf8_show_a_block() {
+    with_writer(|w| {
+        // — (no VGA glyph), then a 3-byte character cut off by "c", then a
+        // stray continuation byte (ignored) and a control byte (ignored).
+        w.write_string("a\u{2014}b");
+        for &byte in b"\xe2\x94c\x80\x01d" {
+            w.write_byte(byte);
+        }
+        assert_eq!(current_row(w, 6), b"a\xfeb\xfecd");
+    });
+}
+
+#[test_case]
+fn vga_utf8_split_across_writes() {
+    with_writer(|w| {
+        let box_corner = "\u{2514}".as_bytes(); // └, 3 bytes
+        for byte in box_corner {
+            w.write_byte(*byte);
+        }
+        assert_eq!(current_row(w, 1), [0xc0]);
+    });
+}
+
+/// Program output goes through the console file. A write may end in the
+/// middle of a UTF-8 character (ulib's printf flushes every 256 bytes); the
+/// next write completes it. This used to come out as "â" plus junk.
+#[test_case]
+fn console_write_keeps_a_character_split_across_writes() {
+    let mut out = rust_os::fs::devices::stdout_file();
+    let rule = "\u{2500}".as_bytes(); // ─, 3 bytes
+    out.write(b"\nx").unwrap();
+    out.write(&rule[..1]).unwrap();
+    out.write(&rule[1..]).unwrap();
+    out.write(b"y").unwrap();
+    let writer = rust_os::vga_buffer::WRITER.lock();
+    let (row, column) = writer.position();
+    let shown: Vec<u8> = (column - 3..column).map(|c| writer.char_at(row, c)).collect();
+    assert_eq!(shown, [b'x', 0xc4, b'y']);
+}
+
+#[test_case]
+fn vga_reserved_top_rows_are_left_alone() {
+    with_writer(|w| {
+        w.write_string("\x0c");
+        w.draw(0, 0, b"STATUS", rust_os::vga_buffer::Color::White, rust_os::vga_buffer::Color::Blue);
+        w.set_scroll_top(1);
+        assert_eq!(w.position(), (1, 0), "text starts below the reserved row");
+        for _ in 0..ROWS + 3 {
+            w.write_string("line\n");
+        }
+        assert_eq!(cell(0, 0), b'S', "scrolling leaves the reserved row");
+        w.write_string("\x0c");
+        assert_eq!(cell(0, 0), b'S', "clearing leaves the reserved row");
+        assert_eq!(w.position(), (1, 0));
+        w.write_string("\x1b[2J\x1b[H");
+        assert_eq!(cell(0, 0), b'S');
+        assert_eq!(w.position(), (1, 0), "ESC[H homes to the region's top");
+        w.reset();
+        assert_eq!(w.position(), (0, 0), "reset gives the whole screen back");
+        assert_eq!(cell(0, 0), b' ');
+    });
+}
+
+#[test_case]
+fn vga_palette_can_be_replaced() {
+    use rust_os::vga_buffer::{palette_entry, set_palette};
+    let mut colors = [(0u8, 0u8, 0u8); 16];
+    for (i, color) in colors.iter_mut().enumerate() {
+        *color = ((i * 16) as u8, 255 - (i * 16) as u8, 0x40);
+    }
+    set_palette(&colors);
+    for i in 0..16u8 {
+        let (r, g, b) = colors[i as usize];
+        // The DAC keeps 6 bits per channel.
+        assert_eq!(palette_entry(i), (r & !3, g & !3, b & !3), "palette entry {}", i);
+    }
+    rust_os::theme::apply();
+    // The terminal background (6, 10, 14), at the DAC's 6-bit precision.
+    assert_eq!(palette_entry(0), (4, 8, 12), "the terminal background");
 }
 
 mod support;

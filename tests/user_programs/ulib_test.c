@@ -64,6 +64,10 @@ static void test_format(void) {
     EXPECT_FORMAT("[  ab]", "[%4s]", "ab");
     EXPECT_FORMAT("[ab  ]", "[%-4s]", "ab");
     EXPECT_FORMAT("[toolong]", "[%3s]", "toolong");
+    EXPECT_FORMAT("[   ab]", "[%*s]", 5, "ab");
+    EXPECT_FORMAT("[ab   ]", "[%*s]", -5, "ab");
+    EXPECT_FORMAT("[007]", "[%0*d]", 3, 7);
+    EXPECT_FORMAT("[]", "[%*s]", 0, "");
     EXPECT_FORMAT("pid=12 status=0", "pid=%d status=%d", 12, 0);
     /* Malformed formats on purpose: printed as written. */
 #pragma clang diagnostic push

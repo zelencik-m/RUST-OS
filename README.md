@@ -5,28 +5,46 @@ It boots into a small Unix-like shell running in user mode.
 
 ## Using the shell
 
-`cargo run` boots the kernel in QEMU and starts `/bin/sh`. Type in the QEMU
-window; the terminal that ran `cargo run` shows a copy of the output (serial).
+`cargo run` boots the kernel in QEMU: a boot screen lists each
+initialization step over an animated dot-matrix wave field, the RUST-OS
+logo sweeps in with a shimmer while a gradient progress bar fills, and then
+the shell starts. Type in the QEMU window;
+the terminal that ran `cargo run` shows a copy of the output and the kernel
+log (serial).
 
 ```
-rust-os shell - type 'help'
-/$ mkdir projects
-/$ cd projects
-/projects$ touch notes.txt
-/projects$ ls
+ RUST-OS  /BIN/SH · TTY0                         PROCS 01 │ UPTIME 00:00:16 ■
+┌─[ RUST-OS ]────────────────────────────────────────────────────────┐
+│ SHELL    /BIN/SH · TTY0        TYPE 'help' FOR THE COMMANDS        │
+│ SESSION  INTERACTIVE           CTRL-C STOPS · CTRL-L CLEARS        │
+└────────────────────────────────────────────────────────────────────┘
+
+/ ► mkdir projects
+/ ► cd projects
+/projects ► touch notes.txt
+/projects ► ls
 notes.txt
-/projects$ cd ..
-/$ ls /bin
+/projects ► cd ..
+/ ► ls /bin
 sh  hello  thread_b  thread_c
-/$ hello a b
+/ ► hello a b
 hello: argc=3 a b
-/$ thread_b
+/ ► thread_b
 executing ELF thread B
 ...
 ^C
-[exit 130]
-/$ rm -r projects
+[exit 130: interrupted]
+/ ► rm -r projects
 ```
+
+The look comes from reprogramming the VGA palette (`src/theme.rs`): text
+mode has 16 colors, but which 16 is up to the kernel. The boot screen uses a
+14-step navy-to-mint gradient (plus amber and glow white), which gives real
+gradients; the console uses a cool slate/cyan/mint
+palette with amber for warnings and red for errors. The top row is a live
+status bar (`src/status_bar.rs`). The console understands ANSI colors and
+cursor sequences and shows UTF-8 box drawing (`─│┌┐░▒▓█►·`) with the VGA
+font, so programs can draw frames.
 
 - **Builtins:** `cd [dir]`, `pwd`, `ls [path]`, `mkdir`, `rmdir`, `rm [-r]`,
   `touch`, `cat`, `echo`, `clear`, `help`, `exit [status]`.
@@ -54,8 +72,11 @@ All test cases live under `tests/`. Run the no-std integration suites with
 configured in `.cargo/config.toml` and `Cargo.toml`). Each Rust test file boots
 its own test kernel. Run one suite with `cargo test --test <file_stem>`.
 
-Debug logging (serial only) is off by default; set `DEBUG_LOG` in
-`src/main.rs` to turn it on for a normal boot. Test kernels keep it disabled.
+The kernel log goes to serial only, as leveled lines with an uptime
+timestamp and the module (`[   0.164] INFO  fs::ext2: mounted ...`). A
+normal boot logs at `Info` (boot steps, the shell starting, programs being
+killed); change `LOG_LEVEL` in `src/main.rs` for `Debug` or `Trace` (every
+context switch). Test kernels keep it off.
 Every suite prints aligned per-test results followed by passed, failed, and
 total counts. Since Cargo starts each integration suite in a separate QEMU
 process, the suite summaries are per test file; Cargo's exit status is the

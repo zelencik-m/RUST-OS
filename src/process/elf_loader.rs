@@ -4,7 +4,7 @@ use x86_64::{
 };
 use xmas_elf::{program::Type, ElfFile};
 
-use crate::debugln;
+use crate::{log_debug, log_trace};
 use crate::memory::address_space::AddressSpace;
 use crate::memory::memory_manager::{MemoryManager, Oom};
 use crate::memory::vma::VmaKind;
@@ -14,11 +14,7 @@ pub fn load_elf(
     space: &mut AddressSpace,
     mm: &mut MemoryManager,
 ) -> Result<VirtAddr, Oom> {
-    debugln!("[ELF] Parsing ELF headers...");
-
     let elf = ElfFile::new(elf_bytes).map_err(|_| Oom)?;
-
-    debugln!("[ELF] Iterating segments...");
 
     for ph in elf.program_iter() {
         let p_type = match ph.get_type() {
@@ -69,8 +65,8 @@ pub fn load_elf(
             VmaKind::Data
         };
 
-        debugln!(
-            "[ELF] Mapping segment at {:#x} (size: {} bytes)...",
+        log_trace!(
+            "mapping segment at {:#x} ({} bytes)",
             start.as_u64(),
             size
         );
@@ -90,8 +86,8 @@ pub fn load_elf(
             let src = &elf_bytes[src_start..src_end];
             let dst = VirtAddr::new_truncate(virt_addr);
 
-            debugln!(
-                "[ELF] Copying {} bytes to {:#x} via direct map...",
+            log_trace!(
+                "copying {} bytes to {:#x}",
                 src.len(),
                 dst.as_u64()
             );
@@ -112,8 +108,8 @@ pub fn load_elf(
             let bss_start = VirtAddr::new_truncate(bss_addr);
             let bss_size = (mem_size - file_size) as usize;
 
-            debugln!(
-                "[ELF] Zeroing BSS at {:#x} ({} bytes)...",
+            log_trace!(
+                "zeroing BSS at {:#x} ({} bytes)",
                 bss_start.as_u64(),
                 bss_size
             );
@@ -129,8 +125,8 @@ pub fn load_elf(
 
     let entry_point = elf.header.pt2.entry_point();
 
-    debugln!(
-        "[ELF] Load complete! Entry point: {:#x}",
+    log_debug!(
+        "loaded, entry point {:#x}",
         entry_point
     );
 
