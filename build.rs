@@ -2,20 +2,40 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PROGRAMS: &[(&str, &str)] = &[
-    ("elf_loader_test", "tests/user_programs"),
-    ("ring3_exception_test", "tests/user_programs"),
-    ("syscall_test", "tests/user_programs"),
-    ("vfs_test", "tests/user_programs"),
-    ("fs_tree_test", "tests/user_programs"),
-    ("fs_ops_test", "tests/user_programs"),
-    ("tty_test", "tests/user_programs"),
-    ("proc_child", "tests/user_programs"),
-    ("spawn_test", "tests/user_programs"),
-    ("nx_exec_test", "tests/user_programs"),
-    ("thread_b", "user_programs"),
-    ("thread_c", "user_programs"),
+/// How a user program is linked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Link {
+    /// The program defines its own `_start` and is linked alone.
+    Bare,
+    /// The program defines `main` and is linked with ulib
+    /// (`user_programs/ulib`), whose crt0 provides `_start`.
+    Ulib,
+}
+
+use Link::{Bare, Ulib};
+
+const PROGRAMS: &[(&str, &str, Link)] = &[
+    ("elf_loader_test", "tests/user_programs", Bare),
+    ("ring3_exception_test", "tests/user_programs", Bare),
+    ("syscall_test", "tests/user_programs", Bare),
+    ("vfs_test", "tests/user_programs", Bare),
+    ("fs_tree_test", "tests/user_programs", Bare),
+    ("fs_ops_test", "tests/user_programs", Bare),
+    ("tty_test", "tests/user_programs", Bare),
+    ("proc_child", "tests/user_programs", Bare),
+    ("spawn_test", "tests/user_programs", Bare),
+    ("nx_exec_test", "tests/user_programs", Bare),
+    ("ulib_test", "tests/user_programs", Ulib),
+    ("thread_b", "user_programs", Bare),
+    ("thread_c", "user_programs", Bare),
+    ("hello", "user_programs", Ulib),
 ];
+
+const ULIB_DIR: &str = "user_programs/ulib";
+
+/// ulib's sources. `crt0` comes first on the link line, so `_start` is at
+/// the start of `.text`; the order doesn't matter otherwise.
+const ULIB_SOURCES: &[&str] = &["crt0", "syscalls", "string", "stdio"];
 
 fn run(command: &mut Command, description: &str) {
     let status = command
@@ -83,6 +103,40 @@ fn generate_syscall_header(numbers_rs: &Path, out_dir: &Path) {
         .expect("failed to write syscall_numbers.h");
 }
 
+/// Compile one C file for user mode.
+fn compile(source: &Path, object: &Path, out_dir: &Path) {
+    println!("cargo:rerun-if-changed={}", source.display());
+    run(
+        Command::new("clang")
+            .arg("--target=x86_64-unknown-none-elf")
+            .args([
+                "-std=c11",
+                "-O2",
+                "-ffreestanding",
+                "-fno-builtin",
+                "-fno-pic",
+                "-fno-pie",
+                "-fno-stack-protector",
+                "-mcmodel=large",
+                "-mno-red-zone",
+                "-mno-mmx",
+                "-mno-sse",
+                "-mno-sse2",
+            ])
+            .arg("-I")
+            .arg("user_programs")
+            .arg("-I")
+            .arg(ULIB_DIR)
+            .arg("-I")
+            .arg(out_dir)
+            .arg("-c")
+            .arg(source)
+            .arg("-o")
+            .arg(object),
+        &format!("compile {}", source.display()),
+    );
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("missing OUT_DIR"));
     let linker_script = Path::new("user_programs/linker.ld");
@@ -91,56 +145,46 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", linker_script.display());
     println!("cargo:rerun-if-changed={}", syscall_header.display());
+    // Also catches files added to ulib (and ulib.h).
+    println!("cargo:rerun-if-changed={ULIB_DIR}");
 
     let syscall_numbers = Path::new("src/syscall/numbers.rs");
     println!("cargo:rerun-if-changed={}", syscall_numbers.display());
     generate_syscall_header(syscall_numbers, &out_dir);
 
-    for &(program, source_dir) in PROGRAMS {
-        let source_dir = Path::new(source_dir);
-        let source = source_dir.join(format!("{program}.c"));
+    // ulib is compiled once and linked into every Ulib program.
+    let ulib_objects: Vec<PathBuf> = ULIB_SOURCES
+        .iter()
+        .map(|name| {
+            let object = out_dir.join(format!("ulib_{name}.o"));
+            compile(&Path::new(ULIB_DIR).join(format!("{name}.c")), &object, &out_dir);
+            object
+        })
+        .collect();
+
+    for &(program, source_dir, link) in PROGRAMS {
+        let source = Path::new(source_dir).join(format!("{program}.c"));
         let object = out_dir.join(format!("{program}.o"));
         let elf = out_dir.join(format!("{program}.elf"));
 
-        println!("cargo:rerun-if-changed={}", source.display());
+        compile(&source, &object, &out_dir);
 
-        run(
-            Command::new("clang")
-                .arg("--target=x86_64-unknown-none-elf")
-                .args([
-                    "-std=c11",
-                    "-O2",
-                    "-ffreestanding",
-                    "-fno-builtin",
-                    "-fno-pic",
-                    "-fno-pie",
-                    "-fno-stack-protector",
-                    "-mcmodel=large",
-                    "-mno-red-zone",
-                    "-mno-mmx",
-                    "-mno-sse",
-                    "-mno-sse2",
-                ])
-                .arg("-I")
-                .arg("user_programs")
-                .arg("-I")
-                .arg(&out_dir)
-                .arg("-c")
-                .arg(&source)
-                .arg("-o")
-                .arg(&object),
-            &format!("compile {}", source.display()),
-        );
-
-        run(
-            Command::new(&linker)
-                .args(["-flavor", "gnu", "-m", "elf_x86_64", "-nostdlib"])
-                .arg("-T")
-                .arg(linker_script)
-                .arg("-o")
-                .arg(&elf)
-                .arg(&object),
-            &format!("link {}", elf.display()),
-        );
+        let mut command = Command::new(&linker);
+        command
+            .args(["-flavor", "gnu", "-m", "elf_x86_64", "-nostdlib"])
+            .arg("-T")
+            .arg(linker_script)
+            .arg("-o")
+            .arg(&elf);
+        match link {
+            // A Bare program must not get crt0: that would be a second `_start`.
+            Bare => {
+                command.arg(&object);
+            }
+            Ulib => {
+                command.arg(&ulib_objects[0]).arg(&object).args(&ulib_objects[1..]);
+            }
+        }
+        run(&mut command, &format!("link {}", elf.display()));
     }
 }
