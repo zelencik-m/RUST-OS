@@ -83,6 +83,10 @@ fn embedded_user_programs_are_x86_64_elfs() {
             include_bytes!(concat!(env!("OUT_DIR"), "/hello.elf")) as &[u8],
         ),
         (
+            "sh",
+            include_bytes!(concat!(env!("OUT_DIR"), "/sh.elf")) as &[u8],
+        ),
+        (
             "thread_b",
             include_bytes!(concat!(env!("OUT_DIR"), "/thread_b.elf")) as &[u8],
         ),

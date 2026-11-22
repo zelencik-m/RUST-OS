@@ -29,6 +29,7 @@ const PROGRAMS: &[(&str, &str, Link)] = &[
     ("thread_b", "user_programs", Bare),
     ("thread_c", "user_programs", Bare),
     ("hello", "user_programs", Ulib),
+    ("sh", "user_programs", Ulib),
 ];
 
 const ULIB_DIR: &str = "user_programs/ulib";

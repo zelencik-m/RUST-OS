@@ -69,6 +69,7 @@ enum {
     EMFILE = 24,
     ENOTTY = 25,
     ERANGE = 34,
+    ENAMETOOLONG = 36,
     ENOSYS = 38,
     ENOTEMPTY = 39,
     ENOENT = 2,

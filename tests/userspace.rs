@@ -57,6 +57,76 @@ elf!(SPAWN_TEST, "spawn_test");
 elf!(PROC_CHILD, "proc_child");
 elf!(ULIB_TEST, "ulib_test");
 elf!(HELLO, "hello");
+elf!(SH, "sh");
+
+/// `sh_script`'s stdin. Every command's expected output is in
+/// `SH_SCRIPT_OUTPUT`, in order.
+const SH_SCRIPT: &str = "\
+# rust-os shell script test (tests/userspace.rs)
+mkdir p5
+cd p5
+pwd
+touch f
+ls
+mkdir d d/e
+touch d/g d/e/h
+rm d
+ls d
+echo \"a  b\" c \"\" end   # a comment
+echo a\"b c\"d
+rmdir nope
+nosuch
+hello x
+/bin/ulib_test ret 3
+cat /sh_note.txt
+cd /
+rm -r p5
+ls p5
+cd /p5
+echo \"unterminated
+exit 4
+echo unreachable
+";
+
+/// What `sh_script` must print (stdout and stderr are one file there).
+const SH_SCRIPT_OUTPUT: &[&str] = &[
+    "/p5\n",
+    "f\n",
+    "rm: d: Is a directory\n",
+    "e/  g\n",
+    "a  b c  end\n",
+    "ab cd\n",
+    "rmdir: nope: No such file or directory\n",
+    "sh: nosuch: command not found\n",
+    "hello: argc=2 x\n",
+    "[exit 3]\n",
+    "note contents\n",
+    "ls: p5: No such file or directory\n",
+    "cd: /p5: No such file or directory\n",
+    "sh: unterminated quote\n",
+];
+
+/// Keys typed into `sh_interactive`. Raw mode passes ESC through, so the
+/// arrow-key sequences can be typed as plain characters.
+const SH_KEYS: &str = concat!(
+    "eho hi",
+    "\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D", // 5 x Left: the cursor is after the 'e'
+    "c\n",                               // -> "echo hi"
+    "\x1b[A\n",                          // Up: "echo hi" again
+    "hello z\n",                         // a program: cooked mode + foreground
+    "exit\n",
+);
+
+/// What `sh_interactive` must print. The editor redraws the row as
+/// `\r prompt line` and moves back to the cursor with `\b`.
+const SH_INTERACTIVE_OUTPUT: &[&str] = &[
+    "rust-os shell - type 'help'\n/$ ",
+    // After inserting 'c': cursor at 2 of 7, so 5 x \b. Then Enter.
+    "\r/$ echo hi\x08\x08\x08\x08\x08\nhi\n",
+    // The history line, cursor at its end.
+    "\r/$ echo hi\nhi\n",
+    "hello: argc=2 z\n",
+];
 
 #[derive(Clone)]
 struct UserCase {
@@ -64,7 +134,9 @@ struct UserCase {
     tid: TID,
     stdout: InodeRef,
     stderr: InodeRef,
-    success_marker: &'static str,
+    /// Strings that must all appear in stdout, in this order (each one
+    /// after the end of the previous).
+    markers: Vec<&'static str>,
     /// Keep this case off the run queue until the named case has finished.
     /// Use it for programs that would race another one on the shared RamFs.
     start_after: Option<&'static str>,
@@ -103,9 +175,30 @@ fn read_inode(inode: &InodeRef) -> Vec<u8> {
 }
 
 fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    find(haystack, needle).is_some()
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
-        .any(|window| window == needle)
+        .position(|window| window == needle)
+}
+
+fn contains_in_order(haystack: &[u8], markers: &[&str]) -> bool {
+    let mut rest = haystack;
+    for marker in markers {
+        match find(rest, marker.as_bytes()) {
+            Some(at) => rest = &rest[at + marker.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Captured output for failure messages: text, with control characters
+/// escaped.
+fn show(bytes: &[u8]) -> String {
+    alloc::format!("{:?}", String::from_utf8_lossy(bytes))
 }
 
 extern "C" fn user_monitor() -> ! {
@@ -127,10 +220,10 @@ extern "C" fn user_monitor() -> ! {
                     (read_inode(&case.stdout), read_inode(&case.stderr))
                 });
                 rust_os::serial_println!(
-                    "{} timed out; stdout={:?}; stderr={:?}",
+                    "{} timed out; stdout={}; stderr={}",
                     case.name,
-                    out,
-                    err
+                    show(&out),
+                    show(&err)
                 );
             }
             panic!("user ELF smoke tests timed out");
@@ -147,8 +240,11 @@ extern "C" fn user_monitor() -> ! {
                     scheduler.get_current() != Some(case.tid) && !scheduler.is_runnable(case.tid);
                 (read_inode(&case.stdout), read_inode(&case.stderr), finished)
             });
-            let marker_seen = bytes_contain(&out, case.success_marker.as_bytes());
-            let failed_output = if case.name == "fs_tree_test" {
+            let marker_seen = contains_in_order(&out, &case.markers);
+            let failed_output = if case.name == "sh_script" {
+                // `exit 4` must stop the script.
+                bytes_contain(&out, b"unreachable")
+            } else if case.name == "fs_tree_test" {
                 [
                     b"[cannot".as_slice(),
                     b"[getdents64",
@@ -164,10 +260,10 @@ extern "C" fn user_monitor() -> ! {
             };
             if !err.is_empty() || failed_output {
                 rust_os::serial_println!(
-                    "{} failed; stdout={:?}; stderr={:?}",
+                    "{} failed; stdout={}; stderr={}",
                     case.name,
-                    out,
-                    err
+                    show(&out),
+                    show(&err)
                 );
                 panic!("user ELF reported failure");
             }
@@ -228,13 +324,45 @@ fn add_case(name: &'static str, image: &[u8], marker: &'static str, root: &Inode
     add_case_with_argv(name, image, &[name], marker, root)
 }
 
-/// Start `image` (kernel-parented, cwd `/`) with this argv, the console as
-/// stdin, and stdout/stderr captured in `/<name>.stdout` and `.stderr`.
+/// Start `image` with this argv, the console as stdin, and stdout/stderr
+/// captured in `/<name>.stdout` and `.stderr`.
 fn add_case_with_argv(
     name: &'static str,
     image: &[u8],
     argv: &[&str],
     marker: &'static str,
+    root: &InodeRef,
+) -> UserCase {
+    add_case_with(
+        name,
+        image,
+        argv,
+        alloc::vec![marker],
+        CaseStdio::default(),
+        root,
+    )
+}
+
+/// How a case's fds 0 and 2 are set up (fd 1 is always the capture file).
+#[derive(Default)]
+struct CaseStdio {
+    /// fd 0. `None`: the console.
+    stdin: Option<File>,
+    /// fd 2 is the *same open file* as fd 1 (shared offset), so error
+    /// messages land in stdout in order with the rest. The runner fails a
+    /// case on any stderr output, so this is how a test checks expected
+    /// errors.
+    stderr_to_stdout: bool,
+}
+
+/// Start `image` (kernel-parented, cwd `/`) with this argv and stdio. Its
+/// stdout must contain `markers` in order.
+fn add_case_with(
+    name: &'static str,
+    image: &[u8],
+    argv: &[&str],
+    markers: Vec<&'static str>,
+    stdio: CaseStdio,
     root: &InodeRef,
 ) -> UserCase {
     let stdout: InodeRef = root
@@ -249,6 +377,12 @@ fn add_case_with_argv(
             rust_os::fs::FileType::Regular,
         )
         .unwrap();
+    let stdout_file = File::new(stdout.clone(), OpenFlags::write_only()).unwrap();
+    let stderr_file = if stdio.stderr_to_stdout {
+        stdout_file.share()
+    } else {
+        File::new(stderr.clone(), OpenFlags::write_only()).unwrap()
+    };
     let (_, tid) = process_manager::spawn_process(SpawnArgs {
         parent: PID(0),
         name: String::from(name),
@@ -256,9 +390,9 @@ fn add_case_with_argv(
         argv,
         cwd: Path::root(),
         stdio: [
-            Some(stdin_file()),
-            Some(File::new(stdout.clone(), OpenFlags::write_only()).unwrap()),
-            Some(File::new(stderr.clone(), OpenFlags::write_only()).unwrap()),
+            Some(stdio.stdin.unwrap_or_else(stdin_file)),
+            Some(stdout_file),
+            Some(stderr_file),
         ],
     })
     .unwrap_or_else(|_| panic!("failed to load user ELF {}", name));
@@ -267,7 +401,7 @@ fn add_case_with_argv(
         tid,
         stdout,
         stderr,
-        success_marker: marker,
+        markers,
         start_after: None,
         input: None,
     }
@@ -293,7 +427,11 @@ fn run_user_elf_smoke_programs() {
     let bin = root
         .create_child("bin", rust_os::fs::FileType::Directory)
         .unwrap();
-    for (name, image) in [("proc_child", &PROC_CHILD.0[..]), ("ulib_test", &ULIB_TEST.0[..])] {
+    for (name, image) in [
+        ("proc_child", &PROC_CHILD.0[..]),
+        ("ulib_test", &ULIB_TEST.0[..]),
+        ("hello", &HELLO.0[..]),
+    ] {
         bin.create_child(name, rust_os::fs::FileType::Regular)
             .unwrap()
             .write_at(0, image)
@@ -355,6 +493,44 @@ fn run_user_elf_smoke_programs() {
         "hello: argc=3 a b\n",
         &root,
     ));
+    // The shell in script mode: stdin is a file, so tty_mode fails with
+    // ENOTTY. stderr goes into stdout so the expected errors are checked in
+    // order. It creates and removes /p5, so it starts after the tree tests.
+    let script = root
+        .create_child("sh_script.in", rust_os::fs::FileType::Regular)
+        .unwrap();
+    script.write_at(0, SH_SCRIPT.as_bytes()).unwrap();
+    root.create_child("sh_note.txt", rust_os::fs::FileType::Regular)
+        .unwrap()
+        .write_at(0, b"note contents\n")
+        .unwrap();
+    let mut sh_script = add_case_with(
+        "sh_script",
+        &SH.0,
+        &["sh"],
+        SH_SCRIPT_OUTPUT.to_vec(),
+        CaseStdio {
+            stdin: Some(File::new(script, OpenFlags::read_only()).unwrap()),
+            stderr_to_stdout: true,
+        },
+        &root,
+    );
+    sh_script.start_after = Some("fs_ops_test");
+    cases.push(sh_script);
+    // The shell on the console: the line editor, history, and running a
+    // program. It switches the console to raw mode, so it waits until the
+    // other console readers (tty_test, then spawn_test) are done.
+    let mut sh_interactive = add_case_with(
+        "sh_interactive",
+        &SH.0,
+        &["sh"],
+        SH_INTERACTIVE_OUTPUT.to_vec(),
+        CaseStdio::default(),
+        &root,
+    );
+    sh_interactive.start_after = Some("spawn_test");
+    sh_interactive.input = Some(SH_KEYS);
+    cases.push(sh_interactive);
     cases.push(add_case(
         "ring3_exception_test",
         &RING3_EXCEPTION.0,

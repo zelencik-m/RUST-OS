@@ -171,6 +171,7 @@ const char *strerror(int error) {
     case EMFILE: return "Too many open files";
     case ENOTTY: return "Inappropriate ioctl for device";
     case ERANGE: return "Numerical result out of range";
+    case ENAMETOOLONG: return "File name too long";
     case ENOSYS: return "Function not implemented";
     case ENOTEMPTY: return "Directory not empty";
     default: return "Unknown error";
