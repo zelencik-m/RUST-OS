@@ -215,18 +215,30 @@ extern "C" fn monitor() -> ! {
     let child = spawn_child_in(p, "/bin", &["echo", "a", "b c"]);
     assert_eq!(parent_of(child.pid), Some(p), "child's parent");
     assert!(children_of(p).contains(&child.pid), "parent's children list");
+    // The cwd outlives the child (a zombie keeps its Process); its fds
+    // don't (they're closed at exit), so they're checked on a child that
+    // is still napping. The echo child may already be gone: it became
+    // runnable inside spawn_process and the timer can switch to it.
+    assert_eq!(
+        PROCESS_MANAGER.lock().process(child.pid).cwd().as_str(),
+        "/bin",
+        "child's cwd"
+    );
+    assert_eq!(wait_child(p, child.pid), Ok(0));
+    assert_eq!(read_all(&child.stdout), b"argv:proc_child|echo|a|b c\n");
+    assert_no_errors(&child);
+    let napper = spawn_child(p, &["nap", "30", "0"]);
     {
         let pm = PROCESS_MANAGER.lock();
-        let process = pm.process(child.pid);
-        assert_eq!(process.cwd().as_str(), "/bin", "child's cwd");
+        let process = pm.process(napper.pid);
+        assert_eq!(process.exit_code, None, "the napping child exited early");
         assert!(
             process.fd_table[0].as_ref().unwrap().inode().is_terminal(),
             "fd 0 must be the console"
         );
+        assert!(process.fd_table[1].is_some(), "fd 1 must be the capture file");
     }
-    assert_eq!(wait_child(p, child.pid), Ok(0));
-    assert_eq!(read_all(&child.stdout), b"argv:proc_child|echo|a|b c\n");
-    assert_no_errors(&child);
+    assert_eq!(wait_child(p, napper.pid), Ok(0));
     pass("process_lifecycle::spawn_process_sets_links_cwd_stdio_and_argv");
 
     // 2. Exit codes: exit(n), and a fatal fault.

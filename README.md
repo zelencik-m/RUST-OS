@@ -8,7 +8,10 @@ It boots into a small Unix-like shell running in user mode.
 `cargo run` boots the kernel in QEMU: a boot screen lists each
 initialization step over an animated dot-matrix wave field, the RUST-OS
 logo sweeps in with a shimmer while a gradient progress bar fills, and then
-the shell starts. Type in the QEMU window;
+the shell starts. The part with interrupts off takes ~0.1 s; the slow part
+(mounting the ext2 disk and installing the programs, ~2 s over emulated
+ATA) runs in a kernel thread while another thread animates the screen, so
+it never freezes. The boot log on serial shows how long each step took. Type in the QEMU window;
 the terminal that ran `cargo run` shows a copy of the output and the kernel
 log (serial).
 

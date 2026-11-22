@@ -100,6 +100,12 @@ pub fn record_tick() {
     UPTIME_TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Timer ticks since boot (~55 ms each). Lock-free, so it can be read
+/// anywhere (unlike `Scheduler::tick_count`).
+pub fn uptime_ticks() -> u64 {
+    UPTIME_TICKS.load(Ordering::Relaxed)
+}
+
 /// Milliseconds since boot (timer resolution: ~55 ms).
 pub fn uptime_millis() -> u64 {
     UPTIME_TICKS.load(Ordering::Relaxed) * MICROS_PER_TICK / 1000

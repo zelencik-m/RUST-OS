@@ -90,13 +90,13 @@ fn screen_contains(expected: &[u8]) -> bool {
 /// the timer.
 #[test_case]
 fn boot_screen_shows_steps_and_the_final_frame() {
-    use rust_os::boot_screen;
-    boot_screen::begin();
+    use rust_os::boot_screen::{self, Frame, LOGO_FRAMES};
+    boot_screen::begin(4);
     boot_screen::step("First step", format_args!("detail {}", 42));
     boot_screen::step("Second step", format_args!("more"));
 
     assert!(screen_contains(b"HOBBY OPERATING SYSTEM"), "the tagline");
-    // Step lines from row 14: a check mark, then upper-case name and detail.
+    // Step lines from row 14: a marker, then upper-case name and detail.
     assert!(screen_has_at(14, 10, &[0xfe]), "the line marker (■)");
     assert!(screen_has_at(14, 13, b"FIRST STEP"));
     assert!(screen_has_at(14, 33, b"DETAIL 42"));
@@ -108,15 +108,27 @@ fn boot_screen_shows_steps_and_the_final_frame() {
         assert!(newer > older, "older lines fade (gradient slots {} vs {})", older, newer);
     }
 
-    boot_screen::draw_frame(0, boot_screen::ANIMATION_FRAMES);
+    // A slow step shows a spinner until it's finished.
+    boot_screen::start_step("Slow step", 2);
+    assert!(screen_has_at(16, 13, b"SLOW STEP"));
+    assert!(screen_has_at(16, 33, b"WORKING"), "a running step says WORKING");
+    boot_screen::finish_step(format_args!("took a while"));
+    assert!(screen_has_at(16, 33, b"TOOK A WHILE"), "finished: its detail");
+    assert!(screen_has_at(16, 10, &[0xfe]), "finished: the ■ marker");
+
+    let frame = |logo, percent, ready| Frame { logo, phase: logo, percent, ready };
+    boot_screen::draw_frame(&frame(0, 0, false));
     assert!(screen_contains(b"STARTING /BIN/SH"));
     assert!(screen_contains(b"  0%"), "the bar starts empty");
     assert!(!screen_contains(&[0xdb; 4]), "the logo hasn't appeared yet");
 
-    boot_screen::draw_frame(boot_screen::ANIMATION_FRAMES, boot_screen::ANIMATION_FRAMES);
+    boot_screen::draw_frame(&frame(LOGO_FRAMES / 2, 42, false));
+    assert!(screen_contains(b" 42%"), "the bar shows the progress it's given");
+
+    boot_screen::draw_frame(&frame(LOGO_FRAMES, 100, true));
     assert!(screen_contains(b"100%"), "the progress bar reaches 100%");
     assert!(screen_contains(b"SYSTEM READY"), "the last step line");
-    // The top row of the logo starts with R's four lit pixels (8 cells).
+    // The top row of the logo starts with R's six blocks, T has eight.
     assert!(screen_contains(&[0xdb; 8]), "the logo is fully drawn");
 
     boot_screen::finish();

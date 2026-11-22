@@ -151,13 +151,28 @@ fn sys_close(pid: PID, fd: u64) -> Result<u64, SysError> {
     Ok(0)
 }
 
+/// A second handle to `pid`'s open file `fd`, sharing its offset.
+///
+/// File I/O must not run while PROCESS_MANAGER is held: that lock keeps
+/// interrupts off, while the filesystem lock (`fs::FS_LOCK`) may have to
+/// sleep, and disk I/O should leave the timer running. So syscalls take a
+/// shared handle, release PROCESS_MANAGER, then do the I/O. Offsets still
+/// end up in the fd table, because the handles share them.
+fn shared_file(pid: PID, fd: u64) -> Result<File, SysError> {
+    PROCESS_MANAGER
+        .lock()
+        .process_mut(pid)
+        .file_mut(fd)
+        .map(|file| file.share())
+        .map_err(SysError::from_fs_error)
+}
+
 /// `read(fd, buf, len)`.
 ///
-/// Regular files are read in 512-byte chunks while holding PROCESS_MANAGER
-/// (the fd's offset lives in the fd table). Device fds (the console) are
-/// different, because `tty::read` can block for as long as nobody types.
-/// That lock keeps interrupts off, so blocking while holding it would
-/// deadlock the scheduler. See `read_device`.
+/// Regular files are read in 512-byte chunks (through a shared handle, with
+/// no locks but the filesystem's). Device fds (the console) take a separate
+/// path, because `tty::read` can block for as long as nobody types; see
+/// `read_device`.
 fn sys_read(
     pid: PID,
     fd: u64,
@@ -171,24 +186,13 @@ fn sys_read(
     let size = usize_from_u64(len)?;
     let src = validate_user_range(user_ptr, size)?;
 
-    let device = {
-        let mut pm = PROCESS_MANAGER.lock();
-        let file = pm
-            .process_mut(pid)
-            .file_mut(fd)
-            .map_err(SysError::from_fs_error)?;
-        let inode = file.inode();
-        if inode.file_type() == FileType::Device {
-            // Same check (and errno) as `File::read`, which this path skips.
-            if !file.flags().can_read() {
-                return Err(SysError::from_fs_error(FsError::ReadOnly));
-            }
-            Some(inode)
-        } else {
-            None
+    let mut file = shared_file(pid, fd)?;
+    let inode = file.inode();
+    if inode.file_type() == FileType::Device {
+        // Same check (and errno) as `File::read`, which this path skips.
+        if !file.flags().can_read() {
+            return Err(SysError::from_fs_error(FsError::ReadOnly));
         }
-    };
-    if let Some(inode) = device {
         return read_device(pid, inode, src, size);
     }
 
@@ -199,14 +203,9 @@ fn sys_read(
     while total < size {
         let chunk = core::cmp::min(buffer.len(), size - total);
 
-        let n = {
-            let mut pm = PROCESS_MANAGER.lock();
-            pm.process_mut(pid)
-                .file_mut(fd)
-                .map_err(SysError::from_fs_error)?
-                .read(&mut buffer[..chunk])
-                .map_err(SysError::from_fs_error)?
-        };
+        let n = file
+            .read(&mut buffer[..chunk])
+            .map_err(SysError::from_fs_error)?;
 
         if n == 0 {
             break;
@@ -224,8 +223,7 @@ fn sys_read(
     Ok(total as u64)
 }
 
-/// Read from a device with no locks held: the caller has already released
-/// PROCESS_MANAGER and kept only the inode. Devices have no file offset.
+/// Read from a device with no locks held. Devices have no file offset.
 ///
 /// Exactly one `read_at` (of at most 512 bytes). A terminal returns as soon
 /// as *some* input is there (a line, or raw bytes). Looping for more, the way
@@ -258,6 +256,7 @@ fn sys_write(
 
     let size = usize_from_u64(len)?;
     let src = validate_user_range(user_ptr, size)?;
+    let mut file = shared_file(pid, fd)?;
 
     let mut total = 0usize;
     let mut addr = src;
@@ -267,14 +266,9 @@ fn sys_write(
         let chunk = core::cmp::min(buffer.len(), size - total);
         copy_from_user(pid, addr, &mut buffer[..chunk])?;
 
-        let n = {
-            let mut pm = PROCESS_MANAGER.lock();
-            pm.process_mut(pid)
-                .file_mut(fd)
-                .map_err(SysError::from_fs_error)?
-                .write(&buffer[..chunk])
-                .map_err(SysError::from_fs_error)?
-        };
+        let n = file
+            .write(&buffer[..chunk])
+            .map_err(SysError::from_fs_error)?;
 
         total += n;
         addr = addr + n as u64;
@@ -460,10 +454,7 @@ fn sys_lseek(
     let whence = SeekWhence::from_raw(whence_raw)
         .map_err(SysError::from_fs_error)?;
 
-    let mut pm = PROCESS_MANAGER.lock();
-    pm.process_mut(pid)
-        .file_mut(fd)
-        .map_err(SysError::from_fs_error)?
+    shared_file(pid, fd)?
         .seek(offset, whence)
         .map_err(SysError::from_fs_error)
 }
@@ -557,10 +548,7 @@ fn sys_getdents64(
     let destination = validate_user_range(user_ptr, size)?;
 
     let output = {
-        let mut pm = PROCESS_MANAGER.lock();
-        let file = pm.process_mut(pid)
-            .file_mut(fd)
-            .map_err(SysError::from_fs_error)?;
+        let mut file = shared_file(pid, fd)?;
         let entries = file.readdir().map_err(SysError::from_fs_error)?;
         let start = usize_from_u64(file.offset())?;
         let mut next = start;

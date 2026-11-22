@@ -105,17 +105,15 @@ impl Scheduler {
     fn requeue_and_pick_next(&mut self) -> Option<TID> {
         let mut pm = PROCESS_MANAGER.lock();
 
-        if let Some(cur) = self.current {
-            let state = pm.get_thread_state(cur);
-            if Some(cur) != self.idle_thread
-                && matches!(state, ThreadState::Running | ThreadState::Ready)
-            {
-                self.runnables.push_back(cur);
-            }
-        }
-
         // Wake every thread whose deadline has passed. The heap is ordered by
         // deadline, so stop at the first entry that is still in the future.
+        //
+        // Woken sleepers are queued *before* the current thread goes back on
+        // the queue: they have been waiting, while the current thread just
+        // ran. Otherwise a busy thread (e.g. one writing to the disk) would
+        // keep the CPU on every tick a sleeper is due, and a thread that
+        // sleeps a tick per frame (the boot animation) would only run every
+        // other tick.
         while let Some(&Reverse(entry)) = self.sleep_queue.peek() {
             if entry.wakeup_tick > self.tick_count {
                 break;
@@ -130,6 +128,15 @@ impl Scheduler {
                 self.runnables.push_back(tid);
             }
         }
+
+        if let Some(cur) = self.current {
+            let state = pm.get_thread_state(cur);
+            if Some(cur) != self.idle_thread
+                && matches!(state, ThreadState::Running | ThreadState::Ready)
+            {
+                self.runnables.push_back(cur);
+            }
+        }
         drop(pm);
 
         if self.runnables.is_empty() {
@@ -139,12 +146,21 @@ impl Scheduler {
         self.next_runnable()
     }
 
-    /// Advance the tick counter. Returns `true` when the current time slice
-    /// has expired and the caller should reschedule.
+    /// Advance the tick counter. Returns `true` when the caller should
+    /// reschedule: the current time slice has expired, or a sleeping thread
+    /// is due.
+    ///
+    /// Without the second case, sleepers are only woken on slice boundaries
+    /// (every `TIME_SLICE` ticks), so `sleep(1)` would really take up to two
+    /// ticks; animations (the boot screen) would run at half the frame rate.
     pub fn tick(&mut self) -> bool {
         self.tick_count = self.tick_count.wrapping_add(1);
         crate::debug::record_tick();
-        self.tick_count % TIME_SLICE == 0
+        let sleeper_due = self
+            .sleep_queue
+            .peek()
+            .map_or(false, |Reverse(entry)| entry.wakeup_tick <= self.tick_count);
+        self.tick_count % TIME_SLICE == 0 || sleeper_due
     }
 }
 

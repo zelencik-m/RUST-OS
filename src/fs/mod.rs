@@ -24,6 +24,26 @@ pub use ext2::{Ext2Fs, Ext2Geometry};
 
 use alloc::sync::Arc;
 
+use crate::sync::{SleepLock, SleepLockGuard};
+
+/// Serializes all filesystem access: every VFS operation ([`with_vfs`]) and
+/// every regular-file operation ([`File`]'s methods). The ext2 driver has no
+/// locks of its own, so this is what keeps two threads from changing it at
+/// once (e.g. both taking the same free block).
+///
+/// It's a [`SleepLock`]: disk I/O runs with interrupts on and can be
+/// preempted (the boot screen animates while the disk is being written),
+/// and a thread that wants the filesystem while another uses it sleeps. So
+/// never use files or the VFS while holding an `IrqSafeMutex` such as
+/// PROCESS_MANAGER: syscalls take a shared handle to the open file
+/// (`File::share`) and release PROCESS_MANAGER first.
+pub static FS_LOCK: SleepLock = SleepLock::new();
+
+/// Take [`FS_LOCK`] (re-entrant).
+pub fn lock() -> SleepLockGuard<'static> {
+    FS_LOCK.lock()
+}
+
 /// Initialize the filesystem stack with the ext2 disk as the VFS root.
 ///
 /// The filesystem image is on the secondary ATA master, separate from the

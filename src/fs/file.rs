@@ -103,13 +103,29 @@ pub struct File {
     flags: OpenFlags,
 }
 
+/// Hold the filesystem lock (`super::FS_LOCK`) for an operation on
+/// `inode`, unless it's a device: the console isn't part of a filesystem,
+/// and its `read` can block on the keyboard for as long as nobody types.
+fn fs_guard(inode: &InodeRef) -> Option<crate::sync::SleepLockGuard<'static>> {
+    if inode.file_type() == FileType::Device {
+        None
+    } else {
+        Some(super::lock())
+    }
+}
+
 impl File {
     pub fn new(inode: InodeRef, flags: OpenFlags) -> Result<Self, FsError> {
         if inode.file_type() == FileType::Directory && flags.can_write() {
             return Err(FsError::IsDirectory);
         }
 
-        let offset = if flags.append() { inode.len()? } else { 0 };
+        let offset = if flags.append() {
+            let _fs = fs_guard(&inode);
+            inode.len()?
+        } else {
+            0
+        };
 
         Ok(Self {
             inode,
@@ -141,6 +157,7 @@ impl File {
             return Err(FsError::IsDirectory);
         }
 
+        let _fs = fs_guard(&self.inode);
         let offset = self.offset();
         let n = self.inode.read_at(offset, buf)?;
         self.set_offset(offset.saturating_add(n as u64));
@@ -155,6 +172,7 @@ impl File {
             return Err(FsError::IsDirectory);
         }
 
+        let _fs = fs_guard(&self.inode);
         let offset = if self.flags.append() {
             self.inode.len()?
         } else {
@@ -170,7 +188,10 @@ impl File {
         let base = match whence {
             SeekWhence::Set => 0i128,
             SeekWhence::Cur => self.offset() as i128,
-            SeekWhence::End => self.inode.len()? as i128,
+            SeekWhence::End => {
+                let _fs = fs_guard(&self.inode);
+                self.inode.len()? as i128
+            }
         };
 
         let new_offset = base.checked_add(offset as i128).ok_or(FsError::InvalidFlags)?;
@@ -186,14 +207,17 @@ impl File {
         if !self.flags.can_write() {
             return Err(FsError::ReadOnly);
         }
+        let _fs = fs_guard(&self.inode);
         self.inode.truncate(size)
     }
 
     pub fn stat(&self) -> Result<FileStat, FsError> {
+        let _fs = fs_guard(&self.inode);
         self.inode.stat()
     }
 
     pub fn readdir(&self) -> Result<alloc::vec::Vec<super::inode::DirEntry>, FsError> {
+        let _fs = fs_guard(&self.inode);
         self.inode.readdir()
     }
 

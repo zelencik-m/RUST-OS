@@ -154,15 +154,24 @@ struct UserCase {
     start_after: Option<&'static str>,
     /// Keys to type on the console once this case's thread blocks (in a
     /// `read(0)`). Typed once.
+    ///
+    /// "Blocks" can also mean waiting for the filesystem lock (another
+    /// program is using the RamFs), so keys may arrive before the program
+    /// reads; the TTY buffers them, which is fine for plain input.
     input: Option<&'static str>,
+    /// Also wait until a foreground process is set (`tty_foreground`)
+    /// before typing. For a Ctrl-C meant to kill a particular child: typed
+    /// any earlier, it would kill nobody.
+    input_needs_foreground: bool,
 }
 
 struct RunnerState {
     cases: Vec<UserCase>,
     /// `(tid, dependency)` for deferred cases that have not been started yet.
     deferred: Vec<(TID, &'static str)>,
-    /// `(tid, keys)` for cases whose input has not been typed yet.
-    pending_input: Vec<(TID, &'static str)>,
+    /// `(tid, keys, needs_foreground)` for cases whose input has not been
+    /// typed yet.
+    pending_input: Vec<(TID, &'static str, bool)>,
 }
 
 static RUNNER: IrqSafeMutex<Option<RunnerState>> = IrqSafeMutex::new(None);
@@ -307,13 +316,15 @@ extern "C" fn user_monitor() -> ! {
             let mut state = RUNNER.lock();
             let state = state.as_mut().expect("userspace monitor state missing");
             let pm = PROCESS_MANAGER.lock();
-            state.pending_input.retain(|&(tid, keys)| {
+            let foreground_set = rust_os::tty::foreground().is_some();
+            state.pending_input.retain(|&(tid, keys, needs_foreground)| {
                 let blocked =
                     pm.thread_exists(tid) && pm.get_thread_state(tid) == ThreadState::Blocked;
-                if blocked {
+                let ready = blocked && (foreground_set || !needs_foreground);
+                if ready {
                     to_type.push(keys);
                 }
-                !blocked
+                !ready
             });
         });
         for keys in to_type {
@@ -416,6 +427,7 @@ fn add_case_with(
         markers,
         start_after: None,
         input: None,
+        input_needs_foreground: false,
     }
 }
 
@@ -482,7 +494,9 @@ fn run_user_elf_smoke_programs() {
     // Its children inherit stdout, so their output comes before the final
     // line. It reads nothing itself, but its `read` child must not take
     // tty_test's input, so it starts after tty_test. The runner types
-    // Ctrl-C when it first blocks (in wait4 for that child).
+    // Ctrl-C once it's blocked (in wait4) with its `read` child as the
+    // foreground. Just "blocked" isn't enough: it can block earlier, on
+    // the filesystem lock inside spawn, and a Ctrl-C then kills nobody.
     let mut spawn_case = add_case(
         "spawn_test",
         &SPAWN_TEST.0,
@@ -491,6 +505,7 @@ fn run_user_elf_smoke_programs() {
     );
     spawn_case.start_after = Some("tty_test");
     spawn_case.input = Some("\u{3}");
+    spawn_case.input_needs_foreground = true;
     cases.push(spawn_case);
     // Creates and removes /ulib_test.out, so it starts after the two
     // programs that walk and change the tree.
@@ -569,7 +584,10 @@ fn run_user_elf_smoke_programs() {
             .collect(),
         pending_input: cases
             .iter()
-            .filter_map(|case| case.input.map(|keys| (case.tid, keys)))
+            .filter_map(|case| {
+                case.input
+                    .map(|keys| (case.tid, keys, case.input_needs_foreground))
+            })
             .collect(),
     });
     {

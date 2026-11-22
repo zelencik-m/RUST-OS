@@ -7,14 +7,29 @@ use crate::process::PID;
 use crate::memory::memory_manager::{MEMORY_MANAGER, Oom};
 use super::manager::ProcessManager;
 
+/// Default kernel stack size for a thread (no guard page below it).
+pub const KERNEL_STACK_SIZE: usize = 4096 * 4;
+
 impl ProcessManager {
     pub fn create_thread_locked(&mut self, pid: PID, entry_point: extern "C" fn() -> !) -> TID {
+        self.create_thread_with_stack_size_locked(pid, entry_point, KERNEL_STACK_SIZE)
+    }
+
+    /// Like `create_thread_locked`, with a kernel stack of `stack_size`
+    /// bytes (a multiple of 16). For kernel threads that need more than the
+    /// default 16 KiB, which has no guard page.
+    pub fn create_thread_with_stack_size_locked(
+        &mut self,
+        pid: PID,
+        entry_point: extern "C" fn() -> !,
+        stack_size: usize,
+    ) -> TID {
         let tid = if let Some(free_tid) = self.free_tids.pop() {
-            self.threads[free_tid.0 as usize] = Some(Box::new(Thread::new(free_tid, pid, 4096 * 4, entry_point)));
+            self.threads[free_tid.0 as usize] = Some(Box::new(Thread::new(free_tid, pid, stack_size, entry_point)));
             free_tid
         } else {
             let tid = TID(self.threads.len() as u64);
-            self.threads.push(Some(Box::new(Thread::new(tid, pid, 4096 * 4, entry_point))));
+            self.threads.push(Some(Box::new(Thread::new(tid, pid, stack_size, entry_point))));
             tid
         };
 

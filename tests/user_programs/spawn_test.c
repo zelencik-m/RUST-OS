@@ -9,9 +9,10 @@
  *
  *   argv:proc_child|echo|hi\ncwd:/bin\nspawn_test: passed\n
  *
- * The runner types Ctrl-C once this program first blocks. That's the
- * wait4 in step 1, which is why the Ctrl-C test comes first. Failures go to
- * stderr, which fails the suite.
+ * The runner types Ctrl-C once this program is blocked and a foreground
+ * process is set: that's the wait4 in step 1, after tty_foreground (it can
+ * block earlier, on the filesystem lock inside spawn). This is why the
+ * Ctrl-C test comes first. Failures go to stderr, which fails the suite.
  */
 #include "syscalls.h"
 

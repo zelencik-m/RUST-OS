@@ -31,17 +31,22 @@ use bootloader::BootInfo;
 use core::fmt;
 use crate::process::process_manager;
 
-/// Initialize the kernel (silently). See [`init_with`].
+/// Initialize the whole kernel, silently: [`init_core`], then mount the
+/// root filesystem ([`init_storage`]). Test kernels use this.
 pub fn init(boot_info: &'static BootInfo) {
-    init_with(boot_info, &mut |_, _| {});
+    init_core(boot_info, &mut |_, _| {});
+    init_storage().expect("filesystem initialization failed");
 }
 
-/// Initialize the kernel, calling `progress(step, detail)` after each step.
-/// `src/main.rs` shows the steps on the boot screen. The first calls come
-/// before the heap exists, so `progress` must not allocate.
+/// Initialize everything that's fast and must come first: CPU tables,
+/// interrupts, memory, the heap, processes and the scheduler. Calls
+/// `progress(step, detail)` after each step (the boot screen shows them);
+/// the first calls come before the heap exists, so `progress` must not
+/// allocate.
 ///
-/// Interrupts stay disabled; the caller enables them when it's ready.
-pub fn init_with(boot_info: &'static BootInfo, progress: &mut dyn FnMut(&str, fmt::Arguments)) {
+/// Interrupts stay disabled; the caller enables them when it's ready. After
+/// this, threads can be created and run.
+pub fn init_core(boot_info: &'static BootInfo, progress: &mut dyn FnMut(&str, fmt::Arguments)) {
     gdt::init();
     interrupts::init_idt();
     progress("CPU tables", format_args!("GDT, TSS with fault stacks, IDT"));
@@ -83,16 +88,6 @@ pub fn init_with(boot_info: &'static BootInfo, progress: &mut dyn FnMut(&str, fm
         format_args!("{} MiB buddy allocator", crate::memory::allocator::HEAP_SIZE >> 20),
     );
 
-    let disk = crate::fs::init().expect("filesystem initialization failed");
-    progress(
-        "Root filesystem",
-        format_args!(
-            "ext2 on ATA disk, {} MiB, {} KiB blocks",
-            disk.size_bytes() >> 20,
-            disk.block_size / 1024
-        ),
-    );
-    
     let mut pm = PROCESS_MANAGER.lock();
     
     // Bootstrap the kernel process (PID 0).
@@ -109,6 +104,15 @@ pub fn init_with(boot_info: &'static BootInfo, progress: &mut dyn FnMut(&str, fm
         .lock()
         .reserve_queue_capacity(64);
     progress("Scheduler", format_args!("kernel process, idle thread, preemption"));
+}
+
+/// Mount the root filesystem: ext2 on the ATA disk, as the VFS root.
+///
+/// Slow (it reads the disk), so `src/main.rs` runs it in a kernel thread
+/// with interrupts on, and the boot screen keeps animating meanwhile. Needs
+/// [`init_core`] first (the heap).
+pub fn init_storage() -> Result<crate::fs::Ext2Geometry, crate::fs::FsError> {
+    crate::fs::init()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

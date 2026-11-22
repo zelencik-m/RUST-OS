@@ -43,7 +43,7 @@
 //! - Switching mode discards the cooked edit line; bytes that are already
 //!   readable stay readable.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use pc_keyboard::{DecodedKey, KeyCode};
 
@@ -450,13 +450,27 @@ static READERS: WaitQueue = WaitQueue::new();
 /// read it without a lock.
 static FOREGROUND: AtomicU64 = AtomicU64::new(0);
 
+/// Whether key presses reach the console. Off while the boot screen is up:
+/// interrupts are on during boot (so it can animate), and an echoed key
+/// would be drawn over the animation. The keys are dropped, not queued.
+static INPUT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Turn keyboard input on or off (see [`INPUT_ENABLED`]).
+pub fn set_input_enabled(enabled: bool) {
+    INPUT_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
 /// Feed one decoded key into the console. Called from the keyboard IRQ, and
-/// directly by tests. Allocation-free.
+/// directly by tests. Allocation-free. Ignored while input is turned off
+/// ([`set_input_enabled`]).
 ///
 /// A cooked-mode Ctrl-C also asks the foreground process (if any) to exit
 /// with `EXIT_INTERRUPTED`. In raw mode, Ctrl-C is just byte 0x03 for the
 /// reader (Linux: `ISIG` off).
 pub fn push_key(key: DecodedKey) {
+    if !INPUT_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
     let (echoed, readable, interrupt) = {
         let mut tty = TTY.lock();
         let interrupt =

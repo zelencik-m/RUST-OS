@@ -48,9 +48,19 @@ fn with_space_and_mm<R>(
 }
 
 pub fn create_thread(pid: PID, entry_point: extern "C" fn() -> !) -> TID {
+    create_thread_with_stack_size(pid, entry_point, super::thread_ops::KERNEL_STACK_SIZE)
+}
+
+/// Create a runnable kernel thread with a kernel stack of `stack_size`
+/// bytes (a multiple of 16).
+pub fn create_thread_with_stack_size(
+    pid: PID,
+    entry_point: extern "C" fn() -> !,
+    stack_size: usize,
+) -> TID {
     let mut scheduler = SCHEDULER.lock();
     let mut pm = PROCESS_MANAGER.lock();
-    let tid = pm.create_thread_locked(pid, entry_point);
+    let tid = pm.create_thread_with_stack_size_locked(pid, entry_point, stack_size);
     drop(pm);
     scheduler.add_runnable(tid);
     tid

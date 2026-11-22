@@ -47,7 +47,16 @@ enum FrameTracker {
 
 pub struct BootInfoFrameAllocator {
     memory_map: &'static MemoryMap,
+    /// How many fresh frames (never handed out before) have been allocated.
     next: usize,
+    /// Where the next fresh frame comes from: an index into the memory map
+    /// and an address. Fresh frames are handed out in memory-map order, the
+    /// same order as `usable_frames`, but continuing from here instead of
+    /// walking the map from the start each time. That walk (`nth(next)`)
+    /// made every allocation O(frames allocated so far): mapping the 10 MiB
+    /// heap at boot took ~3 s under emulation, with interrupts off.
+    cursor_region: usize,
+    cursor_address: u64,
     freed: Vec<PhysFrame<Size4KiB>>,
 
     /// Highest physical frame number seen in any usable memory-map region.
@@ -81,6 +90,8 @@ impl BootInfoFrameAllocator {
         BootInfoFrameAllocator {
             memory_map,
             next: 0,
+            cursor_region: 0,
+            cursor_address: 0,
             freed: Vec::new(),
             max_frame_number,
             tracker: FrameTracker::Bootstrap,
@@ -95,6 +106,27 @@ impl BootInfoFrameAllocator {
             .map(|r| r.range.start_addr()..r.range.end_addr())
             .flat_map(|r| r.step_by(4096))
             .map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
+    }
+
+    /// The next fresh frame in memory-map order, advancing the cursor.
+    fn next_fresh_frame(&mut self) -> Option<PhysFrame> {
+        while let Some(region) = self.memory_map.get(self.cursor_region) {
+            if region.region_type == MemoryRegionType::Usable {
+                let start = region.range.start_addr();
+                let end = region.range.end_addr();
+                if self.cursor_address < start {
+                    self.cursor_address = start;
+                }
+                if self.cursor_address < end {
+                    let frame = PhysFrame::containing_address(PhysAddr::new(self.cursor_address));
+                    self.cursor_address += 4096;
+                    return Some(frame);
+                }
+            }
+            self.cursor_region += 1;
+            self.cursor_address = 0;
+        }
+        None
     }
 
     fn frame_number(frame: PhysFrame<Size4KiB>) -> u64 {
@@ -260,7 +292,7 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
         }
 
         // Otherwise take the next untouched frame from the memory map.
-        let frame = self.usable_frames().nth(self.next);
+        let frame = self.next_fresh_frame();
 
         if let Some(frame) = frame {
             self.next += 1;

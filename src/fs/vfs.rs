@@ -1,6 +1,5 @@
 use alloc::sync::Arc;
 
-use crate::sync::IrqSafeMutex;
 
 use super::error::FsError;
 use super::file::{File, OpenFlags};
@@ -112,7 +111,11 @@ impl Vfs {
     }
 }
 
-pub static VFS: IrqSafeMutex<Option<Vfs>> = IrqSafeMutex::new(None);
+/// The mounted root. A plain spin lock: it's only held inside
+/// [`with_vfs`], under [`super::FS_LOCK`], so it's never contended (and
+/// must not disable interrupts, or disk I/O would freeze the system).
+/// Setting it directly (`*VFS.lock() = ...`) is for boot and tests.
+pub static VFS: spin::Mutex<Option<Vfs>> = spin::Mutex::new(None);
 
 pub fn init() {
     let ramfs = Arc::new(RamFs::new());
@@ -120,7 +123,9 @@ pub fn init() {
     *VFS.lock() = Some(vfs);
 }
 
+/// Run `f` on the mounted root, holding [`super::FS_LOCK`].
 pub fn with_vfs<R>(f: impl FnOnce(&Vfs) -> Result<R, FsError>) -> Result<R, FsError> {
+    let _fs = super::lock();
     let guard = VFS.lock();
     let vfs = guard.as_ref().ok_or(FsError::NotInitialized)?;
     f(vfs)
