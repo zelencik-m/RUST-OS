@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1000" height="300" viewBox="0 0 1000 300" role="img" aria-label="RUST-OS: a preemptive x86_64 kernel written from scratch in Rust">
+  <defs>
+    <pattern id="dots" width="18" height="18" patternUnits="userSpaceOnUse">
+      <circle cx="9" cy="9" r="1.3" fill="#123548"/>
+    </pattern>
+    <radialGradient id="vignette" cx="50%" cy="42%" r="70%">
+      <stop offset="0%" stop-color="#04060c" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#04060c" stop-opacity="0.95"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="34%" r="40%">
+      <stop offset="0%" stop-color="#1c6278" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#1c6278" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="logo" x1="0" y1="46" x2="0" y2="144" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#f2faff"/>
+      <stop offset="30%" stop-color="#b8e8d8"/>
+      <stop offset="70%" stop-color="#5aa496"/>
+      <stop offset="100%" stop-color="#288e8e"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0c2040"/>
+      <stop offset="55%" stop-color="#288e8e"/>
+      <stop offset="100%" stop-color="#b8e8d8"/>
+    </linearGradient>
+    <style>
+      .tag { font: 600 14px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; letter-spacing: 3px; fill: #5ccee0; }
+      .dim { fill: #3a5662; }
+      .chip { font: 600 12px ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; letter-spacing: 1px; fill: #a8d4ce; }
+    </style>
+  </defs>
+  <clipPath id="card"><rect width="1000" height="300" rx="14"/></clipPath>
+  <g clip-path="url(#card)">
+  <rect width="1000" height="300" fill="#04060c"/>
+  <rect width="1000" height="300" rx="14" fill="url(#dots)"/>
+  <rect width="1000" height="300" rx="14" fill="url(#vignette)"/>
+  <rect width="1000" height="300" rx="14" fill="url(#glow)"/>
+  <image x="140.9" y="30" width="718.2" height="134.4" style="image-rendering:pixelated;image-rendering:crisp-edges" href="data:image/png;base64,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"/>
+  <text x="500.0" y="196" text-anchor="middle" class="tag">X86_64 <tspan class="dim">·</tspan> PREEMPTIVE KERNEL <tspan class="dim">·</tspan> WRITTEN FROM SCRATCH IN RUST</text>
+  <rect x="89.8" y="226" width="154.5" height="28" rx="14" fill="#0a1a26" stroke="#1f4a5c"/><text x="167.0" y="244.5" text-anchor="middle" class="chip" textLength="124.5" lengthAdjust="spacingAndGlyphs">RING-3 USERLAND</text><rect x="256.2" y="226" width="196.0" height="28" rx="14" fill="#0a1a26" stroke="#1f4a5c"/><text x="354.2" y="244.5" text-anchor="middle" class="chip" textLength="166.0" lengthAdjust="spacingAndGlyphs">PREEMPTIVE SCHEDULER</text><rect x="464.2" y="226" width="154.5" height="28" rx="14" fill="#0a1a26" stroke="#1f4a5c"/><text x="541.5" y="244.5" text-anchor="middle" class="chip" textLength="124.5" lengthAdjust="spacingAndGlyphs">EXT2 FILESYSTEM</text><rect x="630.8" y="226" width="121.3" height="28" rx="14" fill="#0a1a26" stroke="#1f4a5c"/><text x="691.4" y="244.5" text-anchor="middle" class="chip" textLength="91.3" lengthAdjust="spacingAndGlyphs">23 SYSCALLS</text><rect x="764.0" y="226" width="146.2" height="28" rx="14" fill="#0a1a26" stroke="#1f4a5c"/><text x="837.1" y="244.5" text-anchor="middle" class="chip" textLength="116.2" lengthAdjust="spacingAndGlyphs">105 QEMU TESTS</text>
+  <rect x="0" y="294" width="1000" height="6" fill="url(#bar)" opacity="0.9"/>
+  </g>
+</svg>

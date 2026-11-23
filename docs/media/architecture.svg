@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="438" viewBox="0 0 880 438" role="img" aria-label="Layered diagram: user programs and ulib in ring 3 make system calls into the kernel, which has a system call layer, process, memory and filesystem subsystems, and drivers">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .label { font-size: 12px; font-weight: 600; fill: #7fa8ae; }
+    .box { font-size: 13px; fill: #ecf8fa; }
+    .sub { font-size: 12px; fill: #7fa8ae; }
+  </style>
+  <rect width="880" height="438" rx="10" fill="#060a0e"/>
+    <rect x="20" y="16" width="840" height="132" rx="6" fill="#0c1720" stroke="#1f3a4a"/>
+  <rect x="20" y="24" width="3" height="116" rx="1.5" fill="#70eab2"/>
+  <text x="36" y="38" class="label" fill="#70eab2" style="fill:#70eab2">User space (ring 3)</text>
+  <rect x="36.0" y="50" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="166.66666666666666" y="71.5" text-anchor="middle" class="box">/bin/sh</text>
+  <rect x="309.3333333333333" y="50" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="440.0" y="71.5" text-anchor="middle" class="box">hello, thread_b, thread_c</text>
+  <rect x="582.6666666666666" y="50" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="713.3333333333333" y="71.5" text-anchor="middle" class="box">other C programs</text>
+  <rect x="36.0" y="96" width="808.0" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="440.0" y="117.5" text-anchor="middle" class="box">ulib <tspan class="sub">crt0, syscall wrappers, string, printf</tspan></text>
+  <line x1="20" y1="166" x2="860" y2="166" stroke="#ffba48" stroke-dasharray="4 4"/>
+  <rect x="348.0" y="155" width="184" height="22" fill="#060a0e" stroke="#ffba48" rx="11"/>
+  <text x="440.0" y="170.5" text-anchor="middle" class="sub" style="fill:#ffba48">system calls (int 0x80)</text>
+  <rect x="20" y="184" width="840" height="238" rx="6" fill="#0c1720" stroke="#1f3a4a"/>
+  <rect x="20" y="192" width="3" height="222" rx="1.5" fill="#5ccee0"/>
+  <text x="36" y="206" class="label" fill="#5ccee0" style="fill:#5ccee0">Kernel (ring 0)</text>
+  <rect x="36.0" y="218" width="808.0" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="440.0" y="239.5" text-anchor="middle" class="box">System call layer <tspan class="sub">dispatch, user pointer checks</tspan></text>
+  <rect x="36.0" y="264" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="166.66666666666666" y="285.5" text-anchor="middle" class="box">Process manager</text>
+  <rect x="309.3333333333333" y="264" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="440.0" y="285.5" text-anchor="middle" class="box">Memory manager</text>
+  <rect x="582.6666666666666" y="264" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="713.3333333333333" y="285.5" text-anchor="middle" class="box">VFS</text>
+  <rect x="36.0" y="306" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="166.66666666666666" y="327.5" text-anchor="middle" class="box">Scheduler <tspan class="sub">wait queues</tspan></text>
+  <rect x="309.3333333333333" y="306" width="261.3333333333333" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="440.0" y="327.5" text-anchor="middle" class="box">Frame allocator <tspan class="sub">buddy heap</tspan></text>
+  <rect x="582.6666666666666" y="306" width="81.77777777777779" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="623.5555555555555" y="327.5" text-anchor="middle" class="box">ext2</text>
+  <rect x="672.4444444444445" y="306" width="81.77777777777779" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="713.3333333333334" y="327.5" text-anchor="middle" class="box">RamFs</text>
+  <rect x="762.2222222222222" y="306" width="81.77777777777779" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="803.1111111111111" y="327.5" text-anchor="middle" class="box">TTY</text>
+  <line x1="36" y1="358" x2="844" y2="358" stroke="#1f3a4a"/>
+  <rect x="36.0" y="372" width="193.0" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="132.5" y="393.5" text-anchor="middle" class="box">Interrupts <tspan class="sub">IDT, PIC, PIT</tspan></text>
+  <rect x="241.0" y="372" width="193.0" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="337.5" y="393.5" text-anchor="middle" class="box">ATA PIO disk</text>
+  <rect x="446.0" y="372" width="193.0" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="542.5" y="393.5" text-anchor="middle" class="box">PS/2 keyboard</text>
+  <rect x="651.0" y="372" width="193.0" height="34" rx="4" fill="#08111a" stroke="#2c5262"/>
+  <text x="747.5" y="393.5" text-anchor="middle" class="box">VGA text, serial</text>
+</svg>
